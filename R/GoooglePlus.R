@@ -1,4 +1,5 @@
 install.packages("zeroinfl")
+library(zeroinfl)
 
 goooglePlus <-  function(
     data,
@@ -60,14 +61,21 @@ goooglePlus <-  function(
     }
     # the reason for doing all of the above, as we see in the 'Insurance' example of calling gooogle, is because we usually will set zvars = xvars, but in general the zeroinf
     # explanatory variables and the count explanatory variables may not be in the same groups.
-
+    # get p and q for use later with the intercepts.
+    # vcov matrix also includes for the intercepts
+    p <- length(xvars)
+    q <- length(zvars)
     # use zeroinfl to fit a model, which is part of pscl: this requires "|" in the formula as has been set above - that is the reason why we did it all
     fit.zero <- zeroinfl(fit.formula, dist = dist, data = data)
     b2.mle <- c(fit.zero$coefficients$count[-1], fit.zero$coefficients$zero[-1])
-    fit.coefficients <- fit.zero$coefficients
-
+    # create vector of coefficients with the intercept coefficients set to zero
+    fit.coefficients <- c(fit.zero$coefficients$count[-1], fit.zero$coefficients$zero[-1])
+    zeroinf_residuals <- fit.zero$residuals
     # get the covariance matrix needed for transforming the data
-    vcov <- fit.zero$vcov
+    vcov <- fit.zero$vcov #  TODO: this needs to have the correct parts removed, ie the intercepts need to be removed.
+    # currently vcov is a square p + q + 2 matrix.
+    # how do we make the intercepts zero and allow them to be updated? The gcd is only done for groups and we are not counting the intercepts as groups.
+
     p <- length(xvars)
 
     # possible gimmicks start here up to transformed y and x
@@ -106,7 +114,10 @@ goooglePlus <-  function(
     # names(cov.star) <- c(xvars, zvars)
 
     # reorder the group index and the covariates
-    group <- c(group.x, group.z)
+    intercept_group_index <- max(group) + 1
+    group <- c(group.x, intercept_group_index, group.z, intercept_group_index + 1)
+    # TODO: WATCH OUT FOR GROUP REORDERING BELOW FOR THE ABOVE
+
     unique_groups <- unique(group)
     # initialise pseudo_X reordered by group
     group_ordered_indices <- order(group)
@@ -128,18 +139,21 @@ goooglePlus <-  function(
     # get the group matrices
     # use 'match'
     group_start_indices <- match(unique_groups, group)
-    group_matrices <- numeric(length(unique_groups))
+    group_matrices <- vector("list", length(unique_groups))
     penalty_factors <- numeric(length(unique_groups))
-    group_initial_coefficients <- numeric(length(unique_groups))
-    zeroinf_residuals <- fit.zero$residuals
+    group_initial_coefficients <- vector("list", length(unique_groups))
 
-    for (i in 1:length(group_start_indices)-1) {
-        group_matrices[i] <- pseudo_X[, group_start_indices[i]:group_start_indices[i + 1] - 1]
+    # we want penalty factors of zero for the intercepts, so the last two elements of the group
+
+    for (i in 1:length(group_start_indices) - 1) {
+        group_matrices[[i]] <- pseudo_X[, group_start_indices[i]:group_start_indices[i + 1] - 1]
         penalty_factors[i] <- sqrt(group_start_indices[i + 1] - group_start_indices[i])
-        group_initial_coefficients[i] <- fit.coefficients[group_start_indices[i]:group_start_indices[i + 1] - 1]
+        group_initial_coefficients[[i]] <- fit.coefficients[group_start_indices[i]:group_start_indices[i + 1] - 1]
     }
     group_matrices[length(unique_groups)] <- pseudo_X[, group_start_indices[length(unique_groups)]:ncol(pseudo_X)]
-    penalty_factors[length(unique_groups)] <- sqrt(ncol(pseudo_X) - group_start_indices[length(unique_groups) + 1])
+    # set penalisation to zero for intercepts
+    penalty_factors[length(unique_groups) - 1] <- 0
+    penalty_factors[length(unique_groups)] <- 0
     group_initial_coefficients[length(unique_groups)] <- fit.coefficients[group_start_indices[length(unique_groups)]:length(fit.coefficients)]
 
     # orthonormalise the group matrices
@@ -151,6 +165,9 @@ goooglePlus <-  function(
         return(pair[1])
     })
 
+    # Cross Validation - one parameter only, which is lambda
+    if (missing(lambda) && missing(lambda.max)) {}
+
     orthonormalised_coefficients <- group_coordinate_descent(
         group_matrices_orthonormal,
         lambda,
@@ -160,19 +177,14 @@ goooglePlus <-  function(
         eps,
         pseudo_Y
     )
-    
-    final_coefficients <- numeric(length(orthonormalised_coefficients))
+
+    final_coefficients <- vector("list", length(orthonormalised_coefficients))
     for (i in 1:length(orthonormalised_coefficients)) {
-        final_coefficients[i] <- deorthonormalise_coeffiecients(orthonormalised_coefficients[i], orthonormalisation_factors[i])
+        final_coefficients[[i]] <- deorthonormalise_coefficients(orthonormalised_coefficients[i], orthonormalisation_factors[i])
     }
 
+    # TO DO: consider un-ordering the coefficients: after de-orthonormalising as we used the ordered/grouped ones there
     return(final_coefficients)
-
-
-
-    # TO DO: Add the intercept update in group_coordinate_descent and return the intercepts in the function
-    # do not penalise the intercepts
-
 }
 
 orthonormalise <- function(matrix) {
@@ -187,7 +199,7 @@ orthonormalise <- function(matrix) {
     return(c(matrix %*% matrix_factor, matrix_factor))
 }
 
-deorthonormalise_coeffiecients <- function(coeff, matrix_factor) {
+deorthonormalise_coefficients <- function(coeff, matrix_factor) {
     return(matrix_factor %*% coeff)
 }
 
@@ -208,7 +220,7 @@ group_coordinate_descent <- function(
     gamma = 0,
     penalty = "lasso"
 ) {
-    coefficients <- numeric(length(group_matrices))
+    coefficients <- vector("list", length(group_matrices))
     standard_deviation_y <- sqrt(sum(y ** 2) / sum(sapply(group_matrices, function(mat) {return(nrow(mat))})))
     convergence_threshold <- eps * standard_deviation_y
     penalty_factors <- penalty_factors * lambda
@@ -230,7 +242,7 @@ group_coordinate_descent <- function(
             }
             iteration <- iteration + 1
         }
-        coefficients[i] <- b
+        coefficients[[i]] <- b
     }
     return(coefficients)
 }
