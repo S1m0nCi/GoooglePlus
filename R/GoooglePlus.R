@@ -128,6 +128,11 @@ goooglePlus <-  function(
     unique_groups <- unique(group)
     # initialise pseudo_X reordered by group
     group_ordered_indices <- order(group)
+    # get the indices for putting into unordered form again (original form)
+    unordering_indices <- numeric(length(group))
+    for (i in 1:length(group_ordered_indices)) {
+        unordering_indices[group_ordered_indices[i]] <- i
+    }
     pseudo_X <- pseudo_X[, group_ordered_indices]
     fit.coefficients <- fit.coefficients[group_ordered_indices]
     zeroinf_residuals <- zeroinf_residuals[group_ordered_indices]
@@ -191,7 +196,7 @@ goooglePlus <-  function(
         }
     }
 
-    orthonormalised_coefficients <- group_coordinate_descent(
+    orthonormalised_coefficients_list <- group_coordinate_descent(
         group_matrix_orthonormal,
         lambda,
         penalty_factors,
@@ -201,30 +206,64 @@ goooglePlus <-  function(
         group_start_indices,
         pseudo_Y
     )
-
-    final_coefficients <- vector("list", length(orthonormalised_coefficients))
-    for (i in 1:length(orthonormalised_coefficients)) {
-        final_coefficients[[i]] <- deorthonormalise_coefficients(orthonormalised_coefficients[i], orthonormalisation_factors[i])
+    # TODO: Post-processing
+    # Step 1: De-orthonormalise and unorder coefficients
+    deorthonormalised_coefficients_list <- vector("list", length(orthonormalised_coefficients_list))
+    for (i in 1:orthonormalised_coefficients_list) {
+        deorthonormalised_coefficients_list[[i]] <- deorthonormalise_coefficients(orthonormalised_coefficients_list[i], orthonormalisation_factors, group_start_indices)[unordering_indices]
     }
 
+    # Step 2: de-scale - this may not be needed as we used vcov to generate pseudo data, as according to Zeng.
+
+    # Step 3: Find bic and optimise
+    loss_of_coefficients <- lapply(deorthonormalised_coefficients_list, function(coefficients) {
+        return(mean_squared_error(as.matrix(X), coefficients, as.vector(y)))
+    })
+
+    # get number of model parameters (non-zero coefficients) and exclude intercept
+    df <- lapply(deorthonormalised_coefficients_list, 2, function(x) { return(sum(x != 0)) }) - 1
+    coefficients_bic <- numeric(deorthonormalised_coefficients_list)
+    for (i in 1:length(deorthonormalised_coefficients_list)) {
+        coefficients_bic[i] <- df[[i]] * log(nrow(X)) + nrow(X) * log(loss_of_coefficients[[i]] / nrow(X))
+    }
+
+    min_bic_index <- which.min(coefficients_bic)
+    optimal_coefficients <- deorthonormalised_coefficients_list[[min_bic_index]]
+    optimal_lambda <- lambda[i]
+    optimal_bic <- coefficients_bic[min_bic_index]
+
     # TO DO: consider un-ordering the coefficients: after de-orthonormalising as we used the ordered/grouped ones there
-    return(final_coefficients)
+    return(list(
+                params = deorthonormalised_coefficients_list,
+                group = group,
+                lambda = lambda,
+                df = df,
+                loss = loss_of_coefficients,
+                bic = coefficients_bic,
+                penalty = penalty,
+                n = nrow(X),
+                # iter = iterations,
+                opt_params = optimal_coefficients,
+                opt_lambda = optimal_lambda,
+                opt_bic = optimal_bic))
 }
 
 orthonormalise_full_matrix <- function(all_groups_matrix, group_start_indices) {
     num_cols <- ncol(all_groups_matrix)
     orthonormalised_matrix <- matrix(, nrow = nrow(all_groups_matrix), ncol = num_cols)
-    matrix_factors <- numeric(length(group_start_indices))
+    matrix_factors <- vector("list", length(group_start_indices))
     for (i in 1:length(group_start_indices) - 1) {
         # get the matrix:
         group_matrix <- all_groups_matrix[, group_start_indices[i]:group_start_indices[i + 1] - 1]
         orth_group_matrix_and_factor <- orthonormalise_group_matrix(group_matrix)
         orthonormalised_group_matrix <- orth_group_matrix_and_factor[1]
-        matrix_factors[i] <- orth_group_matrix_and_factor[2]
+        matrix_factors[[i]] <- orth_group_matrix_and_factor[2]
         orthonormalised_matrix[, group_start_indices[i]:group_start_indices[i + 1] - 1] <- orthonormalised_group_matrix
     }
     return(c(orthonormalised_group_matrix, matrix_factors))
 }
+
+# vapply is faster then lapply
 
 orthonormalise_group_matrix <- function(matrix) {
     gram <- (1 / nrow(matrix)) * t(matrix) %*% matrix
@@ -232,14 +271,18 @@ orthonormalise_group_matrix <- function(matrix) {
     eigenvector_matrix <- eigenresult$vectors
     inv_diag_matrix <- diag(sapply(eigenresult$values), function(num) {
         num ^ (-1 / 2)
-    }) # vapply faster
+    })
     matrix_factor <- eigenvector_matrix * inv_diag_matrix
     # keep the matrix factor for transformation back later on.
     return(c(matrix %*% matrix_factor, matrix_factor))
 }
 
-deorthonormalise_coefficients <- function(coeff, matrix_factor) {
-    return(matrix_factor %*% coeff)
+deorthonormalise_coefficients <- function(coeff, matrix_factors, group_start_indices) {
+    deorth_coeff <- numeric(length(coeff))
+    for (i in 1:length(group_start_indices - 1)) {
+        deorth_coeff[[group_start_indices[i]:group_start_indices[i + 1] - 1]] <- matrix_factors[i] %*% coeff[[group_start_indices[i]:group_start_indices[i + 1] - 1]]
+    }
+    return(deorth_coeff)
 }
 
 l2_distance <- function(u, v) {
@@ -274,12 +317,12 @@ group_coordinate_descent <- function(
         convergence_threshold <- eps * standard_deviation_y
         penalty_factors <- penalty_factors * lam
         # do the intercepts first. We treat them as separate, not as one group. We just 'store' them as one group.
-        for (j in group_start_indices[1]:group_start_indices[2]) {
+        for (j in group_start_indices[1]:group_start_indices[2] - 1) {
             iteration <- 1
             lambda <- penalty_factors[1]
             b <- initial_b[1][j]
             r <- initial_residuals
-            X <- group_mat_orth[, group_start_indices[i]:group_start_indices[i + 1] - 1] # will not be changed
+            X <- group_mat_orth[, group_start_indices[j]] # will not be changed
             while (iteration < max_iterations) {
                 z <- t(X) %*% r + b
                 new_b <- vector_soft_threshold(z, lambda_i)
@@ -359,4 +402,8 @@ maxgrad <- function(pseudo_X, residuals, group_start_indices, penalty_factors) {
         zmax <- max(zmax, z)
     }
     return(zmax)
+}
+
+mean_squared_error <- function(pseudo_X, coeff, actual_obs) {
+    return(sum((pseudo_X %*% coeff - actual_obs)^2))
 }
