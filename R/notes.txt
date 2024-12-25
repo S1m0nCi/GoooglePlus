@@ -1,0 +1,5 @@
+maxgrad notes:
+We are trying to find the largest lambda that shrinks all coefficients to zero.
+The way we are shrinking is by using group coordinate descent.
+If modulus(z) < lambda then the soft thresholder is 0 and we have that the coefficient will be zero.
+We need to use glmnet for finding the largest lambda. Notes are in the gooogleplus file.

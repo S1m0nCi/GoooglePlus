@@ -11,3 +11,6 @@ License: Harvard
 LazyData: TRUE
 Imports: pscl, grpreg, stringr, gamlss.dist
 RoxygenNote: 6.0.1
+Suggests: 
+    testthat (>= 3.0.0)
+Config/testthat/edition: 3
