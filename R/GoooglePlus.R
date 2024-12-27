@@ -76,7 +76,6 @@ goooglePlus <-  function(
     q <- length(zvars)
     # use zeroinfl to fit a model, which is part of pscl: this requires "|" in the formula as has been set above - that is the reason why we did it all
     fit.zero <- zeroinfl(fit.formula, dist = dist, data = data)
-    print(fit.zero$coefficients)
 
     # keep the intercepts in the mle and the final data, which we want to have p + q + 2 columns [Zeng]
     b2.mle <- c(fit.zero$coefficients$count, fit.zero$coefficients$zero)
@@ -95,12 +94,13 @@ goooglePlus <-  function(
 
     # get the pseudo data factor sigma to the -1/2
     evcov <- eigen(vcov)
+    pseudo_factor <- evcov$vectors
     # vcov is a square, symmetric matrix
-    if (det(vcov) > 0) {  # in case vcov is not pd add small values to the diagonal ie makePD
-        pseudo_factor <- evcov$vectors %*% diag(1 / sqrt(abs(evcov$values))) %*% t(evcov$vectors)
-    } else {
-        pseudo_factor <- evcov$vectors %*% diag(1 / sqrt(makePD(evcov))) %*% t(evcov$vectors)
-    }
+#    if (det(vcov) > 0) {  # in case vcov is not pd add small values to the diagonal ie makePD
+#        pseudo_factor <- evcov$vectors %*% diag(1 / sqrt(abs(evcov$values))) %*% t(evcov$vectors)
+#    } else {
+#        pseudo_factor <- evcov$vectors %*% diag(1 / sqrt(makePD(evcov))) %*% t(evcov$vectors)
+#    }
 
     pseudo_X <- pseudo_factor
     pseudo_Y <- pseudo_factor %*% b2.mle
@@ -212,8 +212,8 @@ goooglePlus <-  function(
     # TODO: Post-processing
     # Step 1: De-orthonormalise and unorder coefficients
     deorthonormalised_coefficients_list <- vector("list", length(orthonormalised_coefficients_list))
-    for (i in 1:orthonormalised_coefficients_list) {
-        deorthonormalised_coefficients_list[[i]] <- deorthonormalise_coefficients(orthonormalised_coefficients_list[i], orthonormalisation_factors, group_start_indices)[unordering_indices]
+    for (i in 1:length(orthonormalised_coefficients_list)) {
+        deorthonormalised_coefficients_list[[i]] <- deorthonormalise_coefficients(orthonormalised_coefficients_list[[i]], orthonormalisation_factors, group_start_indices)[unordering_indices]
     }
 
     # Step 2: de-scale - this may not be needed as we used vcov to generate pseudo data, as according to Zeng.
@@ -270,11 +270,12 @@ orthonormalise_full_matrix <- function(all_groups_matrix, group_start_indices) {
 
 orthonormalise_group_matrix <- function(matrix) {
     gram <- (1 / nrow(matrix)) * t(matrix) %*% matrix
-    eigenresult <- eigen(gram)
+    # gram is a square matrix
+    eigenresult <- eigen(gram, symmetric = TRUE)
     eigenvector_matrix <- eigenresult$vectors
     inv_diag_matrix <- diag(sapply(eigenresult$values, function(num) {
         num ^ (-1 / 2)
-    }))
+    }), nrow = nrow(gram), ncol = ncol(gram))
     matrix_factor <- eigenvector_matrix %*% inv_diag_matrix
     # keep the matrix factor for transformation back later on.
     matrix_and_factor <- vector("list", 2)
@@ -286,7 +287,7 @@ orthonormalise_group_matrix <- function(matrix) {
 deorthonormalise_coefficients <- function(coeff, matrix_factors, group_start_indices) {
     deorth_coeff <- numeric(length(coeff))
     for (i in 1:(length(group_start_indices) - 1)) {
-        deorth_coeff[[group_start_indices[i]:(group_start_indices[i + 1] - 1)]] <- matrix_factors[i] %*% coeff[[group_start_indices[i]:(group_start_indices[i + 1] - 1)]]
+        deorth_coeff[group_start_indices[i]:(group_start_indices[i + 1] - 1)] <- matrix_factors[[i]] %*% coeff[group_start_indices[i]:(group_start_indices[i + 1] - 1)]
     }
     return(deorth_coeff)
 }
@@ -313,57 +314,53 @@ group_coordinate_descent <- function(
     # also need to worry about how to reorder
     # 'coefficients' below may need to be a vector instead of a list
     coefficients_list <- vector("list", length(lambda))
+    n <- nrow(group_mat_orth)
 
     for (i in 1:length(lambda)) {
         lam <- lambda[i]
 
         # do not keep coefficients in group structure
-        coefficients <- numeric(ncol(group_mat_orth))
         standard_deviation_y <- sqrt(sum(y ** 2) / nrow(group_mat_orth))
         convergence_threshold <- eps * standard_deviation_y
         penalty_factors <- penalty_factors * lam
         r <- y - group_mat_orth %*% initial_b
-        # do the intercepts first. We treat them as separate, not as one group. We just 'store' them as one group.
-        for (j in group_start_indices[1]:(group_start_indices[2] - 1)) {
-            iteration <- 1
-            lambda_0 <- penalty_factors[1]
-            b <- initial_b[j]
-            X <- group_mat_orth[, group_start_indices[j]] # will not be changed
-            for (iteration in 1:max_iterations) {
-                z <- t(X) %*% r + b
+        current_b <- initial_b
+        for (iterations in 1:max_iterations) {
+            # do the intercepts first. We treat them as separate, not as one group. We just 'store' them as one group.
+            max_change <- 0
+            for (j in group_start_indices[1]:(group_start_indices[2] - 1)) {
+                lambda_0 <- penalty_factors[1]
+                b <- current_b[j]
+                X <- group_mat_orth[, group_start_indices[j]] # will not be changed
+                z <- 1/n * t(X) %*% r + b
                 new_b <- vector_soft_threshold(z, lambda_0)
                 b_change <- new_b - b
                 r <- r - X %*% (b_change) # is there an error in the paper by Breheny, which says to use t(X)?
-                max_change <- max(b_change)
                 b <- new_b
-                if (max_change < convergence_threshold) {
-                    break
-                }
+                current_b[j] <- b
+                max_change <- max(max_change, abs(b_change))
             }
-            coefficients[j] <- b
-        }
 
-        for (j in 2:(length(group_start_indices) - 1)) {
-            iteration <- 1
-            lambda_i <- penalty_factors[j]
-            b <- initial_b[group_start_indices[j]:(group_start_indices[j + 1] - 1)]
-            X <- group_mat_orth[, group_start_indices[j]:(group_start_indices[j + 1] - 1)] # will not be changed
-            for (iteration in 1:max_iterations) {
-                z <- t(X) %*% r + b
+            for (j in 2:(length(group_start_indices) - 1)) {
+                lambda_i <- penalty_factors[j]
+                b <- current_b[group_start_indices[j]:(group_start_indices[j + 1] - 1)]
+                X <- group_mat_orth[, group_start_indices[j]:(group_start_indices[j + 1] - 1)] # will not be changed
+                z <- 1/n * t(X) %*% r + b
                 new_b <- vector_soft_threshold(z, lambda_i)
                 b_change <- new_b - b
                 r <- r - X %*% (b_change) # is there an error in the paper by Breheny, which says to use t(X)?
-                max_change <- max(b_change)
                 b <- new_b
-                if (max_change < convergence_threshold) {
-                    break
-                }
+                current_b[group_start_indices[j]:(group_start_indices[j + 1] - 1)] <- b
+                max_change <- max(max_change, max(abs(b_change)))
             }
-            coefficients[group_start_indices[j]:(group_start_indices[j + 1] - 1)] <- b
+
+            if (max_change < convergence_threshold) {
+                break
+            }
         }
-        coefficients_list[i] <- coefficients
+        coefficients_list[[i]] <- current_b
     }
-    return(coefficients)
+    return(coefficients_list)
 }
 # TO DO: Integrate the different penalty functions with the group coordinate descent.
 # would be useful if they had types
