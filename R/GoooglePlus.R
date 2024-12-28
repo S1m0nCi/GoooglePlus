@@ -220,14 +220,14 @@ goooglePlus <-  function(
 
     # Step 3: Find bic and optimise
     loss_of_coefficients <- lapply(deorthonormalised_coefficients_list, function(coefficients) {
-        return(mean_squared_error(as.matrix(X), coefficients, as.vector(y)))
+        return(mean_squared_error(as.matrix(pseudo_X), coefficients, as.vector(pseudo_Y)))
     })
 
-    # get number of model parameters (non-zero coefficients) and exclude intercept
-    df <- lapply(deorthonormalised_coefficients_list, 2, function(x) { return(sum(x != 0)) }) - 1
-    coefficients_bic <- numeric(deorthonormalised_coefficients_list)
+    # get number of model parameters (non-zero coefficients) and exclude intercepts - we have two intercepts
+    df <- lapply(deorthonormalised_coefficients_list, function(x) { return(sum(x != 0) - 2) })
+    coefficients_bic <- numeric(length(deorthonormalised_coefficients_list))
     for (i in 1:length(deorthonormalised_coefficients_list)) {
-        coefficients_bic[i] <- df[[i]] * log(nrow(X)) + nrow(X) * log(loss_of_coefficients[[i]] / nrow(X))
+        coefficients_bic[i] <- df[[i]] * log(nrow(pseudo_X)) + nrow(pseudo_X) * log(loss_of_coefficients[[i]] / nrow(pseudo_X))
     }
 
     min_bic_index <- which.min(coefficients_bic)
@@ -235,7 +235,18 @@ goooglePlus <-  function(
     optimal_lambda <- lambda[i]
     optimal_bic <- coefficients_bic[min_bic_index]
 
-    # TO DO: consider un-ordering the coefficients: after de-orthonormalising as we used the ordered/grouped ones there
+    # TO DO: un-order the coefficients: after de-orthonormalising as we used the ordered/grouped ones there
+    # order gives us a map from old unordered coefficients to new coefficients: e.g [5, 3, 2, 1, 4] =: order
+    # then if we want to map it back, we need an 'inverse'. e.g [4, 3, 2, 5, 1]
+    group_unorder_indices <- numeric(length(group_ordered_indices))
+    for (i in 1:length(group_ordered_indices)) {
+        group_unorder_indices[group_ordered_indices[i]] <- i
+    }
+
+    deorthonormalised_coefficients_list <- lapply(deorthonormalised_coefficients_list, function(coeff) {
+        return(coeff[group_unorder_indices])
+    })
+    
     return(list(
                 params = deorthonormalised_coefficients_list,
                 group = group,
@@ -517,3 +528,5 @@ xvars <- output$xvars
 zvars <- output$zvars
 
 sim_result <- goooglePlus(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)))
+print(sim_result$opt_params)
+print(sim_result$bic)
