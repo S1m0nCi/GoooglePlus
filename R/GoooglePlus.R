@@ -67,6 +67,10 @@ goooglePlus <-  function(
         # "|" separates count model | zero inflation model
         fit.formula <- as.formula(paste(yvar, "~", paste(paste(xvars, collapse = "+"), "|", paste(zvars, collapse = "+")), sep = ""))
     }
+
+    p <- length(xvars)
+    q <- length(zvars)
+
     # vcov matrix also includes for the intercepts
     fit.zero <- zeroinfl(fit.formula, dist = dist, data = data)
 
@@ -78,6 +82,8 @@ goooglePlus <-  function(
     # get the covariance matrix needed for transforming the data
     vcov <- fit.zero$vcov
 
+    names(fit.coefficients)[1] <- "count.intercept"
+    names(fit.coefficients)[p + 2] <- "zero.intercept"
     # get the pseudo data factor vcov (sigma) to the -1/2
     evcov <- eigen(vcov)
     # vcov is symmetric square matrix therefore the matrix of its eigenvectors should be orthogonal ie AT = A^-1
@@ -139,7 +145,13 @@ goooglePlus <-  function(
     if (missing(lambda)) {
         if (missing(lambda_max)) {
             # we may need glmnet here instead of zeroinfl because our method relies on group coordinate descent. Just for finding lambda_max
-            intercepts_fit <- glm(as.formula(paste(yvar, "~ 1")), data = cbind(data.frame(y = unlist(pseudo_Y)), as.data.frame(group_matrix_orthonormal)))# will give matrix of 2 cols, instead of vector
+            group_matrix_df <- as.data.frame(group_matrix_orthonormal)
+            names(group_matrix_df) <- names(fit.coefficients)
+            intercepts_fit <- glm(
+                as.formula(paste(yvar, "~ 0 + count.intercept + zero.intercept")),
+                data = cbind(data.frame(y = unlist(pseudo_Y)), group_matrix_df)
+            )
+            # will give matrix of 2 cols, instead of vector
             # make a matrix of X, Z and rearrange for groups as necessary
 
             zmax <- maxgrad(group_matrix_orthonormal, intercepts_fit$residuals, group_start_indices, penalty_factors) / nrow(group_matrix_orthonormal)
@@ -170,53 +182,53 @@ goooglePlus <-  function(
         zeroinf_residuals,
         eps,
         group_start_indices,
-        pseudo_Y
+        pseudo_Y,
+        penalty = penalty
     )
     # TODO: Post-processing
     # Step 1: De-orthonormalise and unorder coefficients
-    deorthonormalised_coefficients_list <- vector("list", length(orthonormalised_coefficients_list))
+    coefficients_list <- vector("list", length(orthonormalised_coefficients_list))
     for (i in 1:length(orthonormalised_coefficients_list)) {
-        deorthonormalised_coefficients_list[[i]] <- deorthonormalise_coefficients(orthonormalised_coefficients_list[[i]], orthonormalisation_factors, group_start_indices)[unordering_indices]
+        coefficients_list[[i]] <- deorthonormalise_coefficients(
+            orthonormalised_coefficients_list[[i]],
+            orthonormalisation_factors,
+            group_start_indices
+        )[unordering_indices]
     }
 
-    # Step 2: de-scale - this may not be needed as we used vcov to generate pseudo data, as according to Zeng.
-
-    # Step 3: Find bic and optimise
-    loss_of_coefficients <- lapply(deorthonormalised_coefficients_list, function(coefficients) {
-        return(mean_squared_error(as.matrix(pseudo_X), coefficients, as.vector(pseudo_Y)))
+    # Step 2: Find bic and optimise
+    coefficient_log_likelihood <- lapply(coefficients_list, function(coeff) {
+        return(
+            zip_log_likelihood(
+                as.matrix(cbind(1, X)),
+                as.matrix(cbind(1, Z)),
+                coeff[1:(p + 1)],
+                coeff[(p + 2): (p + q + 2)],
+                as.matrix(y)
+            )
+        )
     })
 
     # get number of model parameters (non-zero coefficients) and exclude intercepts - we have two intercepts
-    df <- lapply(deorthonormalised_coefficients_list, function(x) { return(sum(x != 0) - 2) })
-    coefficients_bic <- numeric(length(deorthonormalised_coefficients_list))
-    for (i in 1:length(deorthonormalised_coefficients_list)) {
+    # at the moment, this may be overstated => Zeng's approach of e^lambda may be better.
+    df <- lapply(coefficients_list, function(x) { return(sum(x != 0) - 2) })
+    coefficients_bic <- numeric(length(coefficients_list))
+    for (i in 1:length(coefficients_list)) {
         # klogN - 2log(likelihood(theta))
-        # notice that we have negative log likelihood here - loss function
-        # coefficients_bic[i] <- df[[i]] * log(nrow(pseudo_X)) + nrow(pseudo_X) * log(loss_of_coefficients[[i]] / nrow(pseudo_X))
-        coefficients_bic[i] <- df[[i]] * log(nrow(pseudo_X)) + 2 * log(loss_of_coefficients[[i]])
+        coefficients_bic[i] <- df[[i]] * log(nrow(pseudo_X)) - 2 * coefficient_log_likelihood[[i]]
     }
 
     min_bic_index <- which.min(coefficients_bic)
-    optimal_coefficients <- deorthonormalised_coefficients_list[[min_bic_index]]
+    optimal_coefficients <- coefficients_list[[min_bic_index]]
     optimal_lambda <- lambda[i]
     optimal_bic <- coefficients_bic[min_bic_index]
 
-    # un-order the coefficients: after de-orthonormalising as we used the ordered/grouped ones there
-    group_unorder_indices <- numeric(length(group_ordered_indices))
-    for (i in 1:length(group_ordered_indices)) {
-        group_unorder_indices[group_ordered_indices[i]] <- i
-    }
-
-    deorthonormalised_coefficients_list <- lapply(deorthonormalised_coefficients_list, function(coeff) {
-        return(coeff[group_unorder_indices])
-    })
-
     return(list(
-                params = deorthonormalised_coefficients_list,
+                params = coefficients_list,
                 group = group,
                 lambda = lambda,
                 df = df,
-                loss = loss_of_coefficients,
+                loss = coefficient_log_likelihood,
                 bic = coefficients_bic,
                 penalty = penalty,
                 n = nrow(X),
@@ -281,8 +293,8 @@ group_coordinate_descent <- function(
     group_start_indices,
     y,
     max_iterations = 1000,
-    gamma = 0,
-    penalty = "lasso"
+    gamma = ifelse(penalty == "grSCAD", 4, 3),
+    penalty = c("grLasso", "grMCP", "grSCAD")
 ) {
     # we need to output all of the coefficients from the different lambdae
     # we then calculate loss etc using bic later
@@ -290,6 +302,15 @@ group_coordinate_descent <- function(
     # 'coefficients' below may need to be a vector instead of a list
     coefficients_list <- vector("list", length(lambda))
     n <- nrow(group_mat_orth)
+    penalty <- match.arg(penalty)
+
+    if (penalty == "grLasso") {
+        threshold <- vector_soft_threshold
+    } else if (penalty == "grMCP") {
+        threshold <- vector_mcp_firm_threshold
+    } else if (penalty == "grSCAD") {
+        threshold <- vector_scad_firm_threshold
+    }
 
     for (i in 1:length(lambda)) {
         lam <- lambda[i]
@@ -308,7 +329,7 @@ group_coordinate_descent <- function(
                 b <- current_b[j]
                 X <- group_mat_orth[, group_start_indices[j], drop = FALSE] # will not be changed
                 z <- 1 / n * t(X) %*% r + b
-                new_b <- vector_soft_threshold(z, lambda_0)
+                new_b <- threshold(z, lambda_0, gamma)
                 b_change <- new_b - b
                 r <- r - X %*% (b_change) # is there an error in the paper by Breheny, which says to use t(X)?
                 b <- new_b
@@ -321,7 +342,7 @@ group_coordinate_descent <- function(
                 b <- current_b[group_start_indices[j]:(group_start_indices[j + 1] - 1)]
                 X <- group_mat_orth[, group_start_indices[j]:(group_start_indices[j + 1] - 1), drop = FALSE] # will not be changed
                 z <- 1 / n * t(X) %*% r + b
-                new_b <- vector_soft_threshold(z, lambda_i)
+                new_b <- threshold(z, lambda_i, gamma)
                 b_change <- new_b - b
                 r <- r - X %*% (b_change) # is there an error in the paper by Breheny, which says to use t(X)?
                 b <- new_b
@@ -337,15 +358,6 @@ group_coordinate_descent <- function(
     }
     return(coefficients_list)
 }
-# TO DO: Integrate the different penalty functions with the group coordinate descent.
-# would be useful if they had types
-# lasso for now, group MCP and SCAD for later
-lasso_penalty <- function(vect) {
-    return(sqrt(sum(vect^2)))
-}
-
-mcp_penalty <- function() {}
-scad_penalty <- function() {}
 
 soft_threshold <- function(num, lambda) {
     if (num > lambda) {
@@ -356,9 +368,37 @@ soft_threshold <- function(num, lambda) {
     return(0)
 }
 
-vector_soft_threshold <- function(vect, lambda) {
+vector_soft_threshold <- function(vect, lambda, gamma) {
     norm <- sqrt(sum(vect^2))
     return(soft_threshold(norm, lambda) * vect / norm)
+}
+
+mcp_firm_threshold <- function(num, lambda, gamma) {
+    if (abs(num) <= lambda * gamma) {
+        return(soft_threshold(num, lambda) / (1 - 1 / gamma))
+    } else {
+        return(num)
+    }
+}
+
+scad_firm_threshold <- function(num, lambda, gamma) {
+    if (abs(num) <= 2 * lambda) {
+        return(soft_threshold(num, lambda))
+    } else if (abs(num) <= gamma * lambda) {
+        return(soft_threshold(num, lambda * gamma / (gamma - 1)) / (1 - 1 / (gamma - 1)))
+    } else {
+        return(num)
+    }
+}
+
+vector_mcp_firm_threshold <- function(vect, lambda, gamma) {
+    norm <- sqrt(sum(vect^2))
+    return(mcp_firm_threshold(norm, lambda, gamma) * vect / norm)
+}
+
+vector_scad_firm_threshold <- function(vect, lambda, gamma) {
+    norm <- sqrt(sum(vect^2))
+    return(scad_firm_threshold(norm, lambda, gamma) * vect / norm)
 }
 
 maxgrad <- function(X, residuals, group_start_indices, penalty_factors) {
@@ -383,9 +423,9 @@ maxgrad <- function(X, residuals, group_start_indices, penalty_factors) {
         # now, when we penalise we are using group size-derived penalty factors, lambda_j = lambda * sqrt(group_size)
         # this is what actually gets used in the coordinate descent, so we have to take account of that
         # sqrt(sum(Z^2)) is the norm of Z
-        # so sqrt(sum(Z^2)) < lambda_j (we have to use for group Xj) => sqrt(sum(Z^2)) < lambda * sqrt(group_size)[or penalty factor]
+        # so we need sqrt(sum(Z^2)) < lambda_j (we have to use for group Xj) => sqrt(sum(Z^2)) < lambda * sqrt(group_size)[or penalty factor]
         # hence we get the below lower bound for lambda to penalise (and converge!) to zero. We want to find the greatest lower bound that we can.
-        z <- sqrt(sum(Z^2)) / penalty_factors[i]
+        z <- sqrt(sum(Z^2)) / (penalty_factors[i])
         zmax <- max(zmax, z)
     }
     return(zmax)
@@ -394,6 +434,32 @@ maxgrad <- function(X, residuals, group_start_indices, penalty_factors) {
 mean_squared_error <- function(pseudo_X, coeff, actual_obs) {
     predictions <- pseudo_X %*% coeff
     return(sum((predictions - actual_obs)^2) / nrow(pseudo_X))
+}
+
+# Taken from Lambert's paper
+zip_log_likelihood <- function(X, Z, x_coeff, z_coeff, y) {
+    # nrow(X) = nrow(Z) = length(y)
+    n <- length(y)
+    # indices of where y is zero
+    indices_y0 <- which(y == 0)
+    indices_yg0 <- which(y > 0)
+
+    sum_log_y0 <- sum(sapply(indices_y0, function(i) {
+        return(log(exp(Z[i, ] %*% z_coeff) + exp(-exp(X[i, ] %*% x_coeff))))
+    }))
+
+    sum_all_y <- 0
+    for (i in 1:n) {
+        sum_all_y <- sum_all_y + log(1 + exp(Z[i, ] %*% z_coeff))
+    }
+
+    sum_y_g0 <- sum(
+        sapply(indices_yg0, function(i) {
+            return(y[i] * X[i, ] %*% x_coeff - exp(X[i, ] %*% x_coeff) - sum(sapply(1:y[i], log)))
+        })
+    )
+
+    return(sum_log_y0 + sum_y_g0 - sum_all_y)
 }
 
 library(mpath)
@@ -492,6 +558,15 @@ yvar <- output$yvar
 xvars <- output$xvars
 zvars <- output$zvars
 
-sim_result <- goooglePlus(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)))
-print(sim_result$opt_params)
-print(sim_result$bic)
+sim_result_grLasso <- goooglePlus(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), penalty = "grLasso")
+sim_result_grMCP <- goooglePlus(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), penalty = "grMCP")
+sim_result_grSCAD <- goooglePlus(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), penalty = "grSCAD")
+print("LASSO")
+print(sim_result_grLasso$opt_params)
+print(sim_result_grLasso$bic)
+print("MCP")
+print(sim_result_grMCP$opt_params)
+print(sim_result_grMCP$bic)
+print("SCAD")
+print(sim_result_grSCAD$opt_params)
+print(sim_result_grSCAD$bic)
