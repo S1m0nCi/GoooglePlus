@@ -25,6 +25,8 @@ goooglePlus <-  function(
     warn = TRUE
 )
 {
+
+    start <- Sys.time()
     # getting the appropriate columns from the data frame - 1d output only
     y <- data.frame(data[, yvar])
     X <- data.frame(data[, xvars])
@@ -75,6 +77,7 @@ goooglePlus <-  function(
     fit.zero <- zeroinfl(fit.formula, dist = dist, data = data)
 
     # keep the intercepts in the mle and the final data, which we want to have p + q + 2 columns [Zeng]
+    # different to Gooogle where the approximation is used.
     b2.mle <- c(fit.zero$coefficients$count, fit.zero$coefficients$zero)
 
     fit.coefficients <- c(fit.zero$coefficients$count, fit.zero$coefficients$zero)
@@ -87,9 +90,9 @@ goooglePlus <-  function(
     # get the pseudo data factor vcov (sigma) to the -1/2
     evcov <- eigen(vcov)
     # vcov is symmetric square matrix therefore the matrix of its eigenvectors should be orthogonal ie AT = A^-1
-    inv_sqrt_diag <- diag(sapply(evcov$values, function(num) {
+    inv_sqrt_diag <- diag(vapply(evcov$values, function(num) {
         num ^ (-1 / 2)
-    }), nrow = nrow(evcov$vectors), ncol = ncol(evcov$vectors))
+    }, numeric(1)), nrow = nrow(evcov$vectors), ncol = ncol(evcov$vectors))
     pseudo_factor <- evcov$vectors %*% inv_sqrt_diag %*% t(evcov$vectors)
 
     pseudo_X <- pseudo_factor
@@ -185,7 +188,7 @@ goooglePlus <-  function(
         pseudo_Y,
         penalty = penalty
     )
-    # TODO: Post-processing
+
     # Step 1: De-orthonormalise and unorder coefficients
     coefficients_list <- vector("list", length(orthonormalised_coefficients_list))
     for (i in 1:length(orthonormalised_coefficients_list)) {
@@ -196,22 +199,30 @@ goooglePlus <-  function(
         )[unordering_indices]
     }
 
+    print(paste("Before BIC is", Sys.time() - start))
+
+    mat_X <- as.matrix(cbind(1, X))
+    mat_Z <- as.matrix(cbind(1, Z))
+    mat_y <- as.matrix(y)
+
     # Step 2: Find bic and optimise
-    coefficient_log_likelihood <- lapply(coefficients_list, function(coeff) {
+    coefficient_log_likelihood <- vapply(coefficients_list, function(coeff) {
         return(
             zip_log_likelihood(
-                as.matrix(cbind(1, X)),
-                as.matrix(cbind(1, Z)),
+                mat_X,
+                mat_Z,
                 coeff[1:(p + 1)],
                 coeff[(p + 2): (p + q + 2)],
-                as.matrix(y)
+                mat_y
             )
         )
-    })
+    }, numeric(1))
+
+    print(Sys.time() - start)
 
     # get number of model parameters (non-zero coefficients) and exclude intercepts - we have two intercepts
     # at the moment, this may be overstated => Zeng's approach of e^lambda may be better.
-    df <- lapply(coefficients_list, function(x) { return(sum(x != 0) - 2) })
+    df <- vapply(coefficients_list, function(x) { return(sum(x != 0) - 2) }, numeric(1))
     coefficients_bic <- numeric(length(coefficients_list))
     for (i in 1:length(coefficients_list)) {
         # klogN - 2log(likelihood(theta))
@@ -222,6 +233,11 @@ goooglePlus <-  function(
     optimal_coefficients <- coefficients_list[[min_bic_index]]
     optimal_lambda <- lambda[i]
     optimal_bic <- coefficients_bic[min_bic_index]
+    count_coefficients <- optimal_coefficients[1:(p + 1)]
+    zero_coefficients <- optimal_coefficients[(p + 2):(p + q + 2)]
+    names(count_coefficients) <- names(fit.zero$coefficients$count)
+    names(zero_coefficients) <- names(fit.zero$coefficients$zero)
+    opt_params <- list(count = count_coefficients, zero = zero_coefficients)
 
     return(list(
                 params = coefficients_list,
@@ -233,7 +249,7 @@ goooglePlus <-  function(
                 penalty = penalty,
                 n = nrow(X),
                 # iter = iterations,
-                opt_params = optimal_coefficients,
+                coefficients = opt_params,
                 opt_lambda = optimal_lambda,
                 opt_bic = optimal_bic))
 }
@@ -253,16 +269,14 @@ orthonormalise_full_matrix <- function(all_groups_matrix, group_start_indices) {
     return(list(orthonormalised_matrix, matrix_factors))
 }
 
-# vapply is faster then lapply
-
 orthonormalise_group_matrix <- function(matrix) {
     gram <- (1 / nrow(matrix)) * t(matrix) %*% matrix
     # gram is a square matrix
     eigenresult <- eigen(gram, symmetric = TRUE)
     eigenvector_matrix <- eigenresult$vectors
-    inv_diag_matrix <- diag(sapply(eigenresult$values, function(num) {
+    inv_diag_matrix <- diag(vapply(eigenresult$values, function(num) {
         num ^ (-1 / 2)
-    }), nrow = nrow(gram), ncol = ncol(gram))
+    }, numeric(1)), nrow = nrow(gram), ncol = ncol(gram))
     matrix_factor <- eigenvector_matrix %*% inv_diag_matrix
     # keep the matrix factor for transformation back later on.
     matrix_and_factor <- vector("list", 2)
@@ -328,7 +342,7 @@ group_coordinate_descent <- function(
             for (j in group_start_indices[1]:(group_start_indices[2] - 1)) {
                 b <- current_b[j]
                 X <- group_mat_orth[, group_start_indices[j], drop = FALSE] # will not be changed
-                z <- 1 / n * t(X) %*% r + b
+                z <- (1 / n) * t(X) %*% r + b
                 new_b <- threshold(z, lambda_0, gamma)
                 b_change <- new_b - b
                 r <- r - X %*% (b_change) # is there an error in the paper by Breheny, which says to use t(X)?
@@ -341,7 +355,7 @@ group_coordinate_descent <- function(
                 lambda_i <- penalty_factors[j]
                 b <- current_b[group_start_indices[j]:(group_start_indices[j + 1] - 1)]
                 X <- group_mat_orth[, group_start_indices[j]:(group_start_indices[j + 1] - 1), drop = FALSE] # will not be changed
-                z <- 1 / n * t(X) %*% r + b
+                z <- (1 / n) * t(X) %*% r + b
                 new_b <- threshold(z, lambda_i, gamma)
                 b_change <- new_b - b
                 r <- r - X %*% (b_change) # is there an error in the paper by Breheny, which says to use t(X)?
@@ -443,23 +457,22 @@ zip_log_likelihood <- function(X, Z, x_coeff, z_coeff, y) {
     # indices of where y is zero
     indices_y0 <- which(y == 0)
     indices_yg0 <- which(y > 0)
+    X_0 <- X[indices_y0, ]
+    X_g0 <- X[indices_yg0, ]
+    Z_0 <- Z[indices_y0, ]
+    y_g0 <- y[indices_yg0, ]
 
-    sum_log_y0 <- sum(sapply(indices_y0, function(i) {
-        return(log(exp(Z[i, ] %*% z_coeff) + exp(-exp(X[i, ] %*% x_coeff))))
-    }))
+    sum_log_y0 <- sum(log(exp(Z_0 %*% z_coeff) + exp(-exp(X_0 %*% x_coeff))))
 
-    sum_all_y <- 0
-    for (i in 1:n) {
-        sum_all_y <- sum_all_y + log(1 + exp(Z[i, ] %*% z_coeff))
-    }
+    sum_all_y <- sum(log(1 + exp(Z %*% z_coeff)))
 
-    sum_y_g0 <- sum(
-        sapply(indices_yg0, function(i) {
-            return(y[i] * X[i, ] %*% x_coeff - exp(X[i, ] %*% x_coeff) - sum(sapply(1:y[i], log)))
-        })
-    )
+    sum_yg0 <- sum(y_g0 * (X_g0 %*% x_coeff) - exp(X_g0 %*% x_coeff))
 
-    return(sum_log_y0 + sum_y_g0 - sum_all_y)
+    sum_yg0_factorial <- sum(vapply(y_g0, function(y) {
+        sum(log(1:y))
+    }, numeric(1)))
+
+    return(sum_log_y0 + sum_yg0 - sum_all_y - sum_yg0_factorial)
 }
 
 library(mpath)
@@ -558,15 +571,20 @@ yvar <- output$yvar
 xvars <- output$xvars
 zvars <- output$zvars
 
-sim_result_grLasso <- goooglePlus(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), penalty = "grLasso")
+print(system.time(sim_result_grLasso <- goooglePlus(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), penalty = "grLasso")))
 sim_result_grMCP <- goooglePlus(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), penalty = "grMCP")
 sim_result_grSCAD <- goooglePlus(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), penalty = "grSCAD")
-print("LASSO")
-print(sim_result_grLasso$opt_params)
+#print("LASSO")
+#print(sim_result_grLasso$coefficients)
 print(sim_result_grLasso$bic)
-print("MCP")
-print(sim_result_grMCP$opt_params)
-print(sim_result_grMCP$bic)
-print("SCAD")
-print(sim_result_grSCAD$opt_params)
-print(sim_result_grSCAD$bic)
+#print("MCP")
+#print(sim_result_grMCP$coefficients)
+#print(sim_result_grMCP$bic)
+#print("SCAD")
+#print(sim_result_grSCAD$coefficients)
+#print(sim_result_grSCAD$bic)
+
+print(system.time(sim_result_grLasso_old <- gooogle(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), dist = "poisson", penalty = "grLasso")))
+#print(sim_result_grLasso_old$coefficients)
+sim_result_grMCP_old <- gooogle(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), dist = "poisson", penalty = "grMCP")
+sim_result_grSCAD_old <- gooogle(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), dist = "poisson", penalty = "grSCAD")
