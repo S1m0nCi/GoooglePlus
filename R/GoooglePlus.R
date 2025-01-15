@@ -25,8 +25,6 @@ goooglePlus <-  function(
     warn = TRUE
 )
 {
-
-    start <- Sys.time()
     # getting the appropriate columns from the data frame - 1d output only
     y <- data.frame(data[, yvar])
     X <- data.frame(data[, xvars])
@@ -111,12 +109,6 @@ goooglePlus <-  function(
     pseudo_X <- pseudo_X[, group_ordered_indices, drop = FALSE]
     fit.coefficients <- fit.coefficients[group_ordered_indices]
 
-    # pseudo_X.reordered <- rep(0, dim(cov.star)[1])
-    # for (i in 1:length(uniqu_groups)) {
-    #     indices <- which(group == unique_groups[i])
-    #     cov.star.reordered <- cbind(cov.star.reordered, cov.star[, indices])
-    # }
-    # cov.star.reordered <- cov.star.reordered[, -1]
     group <- sort(group)
     unique_groups <- unique(group)
     # scaling and group sorting has now already been done
@@ -127,7 +119,6 @@ goooglePlus <-  function(
     # get the group matrices
     # use 'match'
     group_start_indices <- c(match(unique_groups, group), length(group) + 1)
-    # group_matrices <- vector("list", length(unique_groups))
     penalty_factors <- numeric(length(unique_groups))
     # the intercepts are to be unpenalised - setting penalisation to 0.
     penalty_factors[1] <- 0
@@ -156,7 +147,6 @@ goooglePlus <-  function(
             )
             # will give matrix of 2 cols, instead of vector
             # make a matrix of X, Z and rearrange for groups as necessary
-
             zmax <- maxgrad(group_matrix_orthonormal, intercepts_fit$residuals, group_start_indices, penalty_factors) / nrow(group_matrix_orthonormal)
             lambda_max <- zmax
         }
@@ -190,16 +180,13 @@ goooglePlus <-  function(
     )
 
     # Step 1: De-orthonormalise and unorder coefficients
-    coefficients_list <- vector("list", length(orthonormalised_coefficients_list))
-    for (i in 1:length(orthonormalised_coefficients_list)) {
-        coefficients_list[[i]] <- deorthonormalise_coefficients(
-            orthonormalised_coefficients_list[[i]],
+    coefficients_list <- lapply(orthonormalised_coefficients_list, function(coeff) {
+        return(deorthonormalise_coefficients(
+            coeff,
             orthonormalisation_factors,
             group_start_indices
-        )[unordering_indices]
-    }
-
-    print(paste("Before BIC is", Sys.time() - start))
+        )[unordering_indices])
+    })
 
     mat_X <- as.matrix(cbind(1, X))
     mat_Z <- as.matrix(cbind(1, Z))
@@ -218,16 +205,12 @@ goooglePlus <-  function(
         )
     }, numeric(1))
 
-    print(Sys.time() - start)
-
     # get number of model parameters (non-zero coefficients) and exclude intercepts - we have two intercepts
     # at the moment, this may be overstated => Zeng's approach of e^lambda may be better.
     df <- vapply(coefficients_list, function(x) { return(sum(x != 0) - 2) }, numeric(1))
-    coefficients_bic <- numeric(length(coefficients_list))
-    for (i in 1:length(coefficients_list)) {
-        # klogN - 2log(likelihood(theta))
-        coefficients_bic[i] <- df[[i]] * log(nrow(pseudo_X)) - 2 * coefficient_log_likelihood[[i]]
-    }
+    coefficients_bic <- vapply(1:length(coefficient_log_likelihood), function(i) {
+        return(df[i] * log(nrow(pseudo_X)) - 2 * coefficient_log_likelihood[i])
+    }, numeric(1))
 
     min_bic_index <- which.min(coefficients_bic)
     optimal_coefficients <- coefficients_list[[min_bic_index]]
@@ -452,8 +435,6 @@ mean_squared_error <- function(pseudo_X, coeff, actual_obs) {
 
 # Taken from Lambert's paper
 zip_log_likelihood <- function(X, Z, x_coeff, z_coeff, y) {
-    # nrow(X) = nrow(Z) = length(y)
-    n <- length(y)
     # indices of where y is zero
     indices_y0 <- which(y == 0)
     indices_yg0 <- which(y > 0)
@@ -468,9 +449,10 @@ zip_log_likelihood <- function(X, Z, x_coeff, z_coeff, y) {
 
     sum_yg0 <- sum(y_g0 * (X_g0 %*% x_coeff) - exp(X_g0 %*% x_coeff))
 
-    sum_yg0_factorial <- sum(vapply(y_g0, function(y) {
-        sum(log(1:y))
-    }, numeric(1)))
+    # sum over all y > 0 of (log(y!) = sum to y from 1 of logn)
+    # we could possibly make this even faster
+    log_sum <- cumsum(log(1:max(y_g0)))
+    sum_yg0_factorial <- sum(log_sum[y_g0])
 
     return(sum_log_y0 + sum_yg0 - sum_all_y - sum_yg0_factorial)
 }
@@ -571,20 +553,156 @@ yvar <- output$yvar
 xvars <- output$xvars
 zvars <- output$zvars
 
-print(system.time(sim_result_grLasso <- goooglePlus(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), penalty = "grLasso")))
-sim_result_grMCP <- goooglePlus(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), penalty = "grMCP")
-sim_result_grSCAD <- goooglePlus(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), penalty = "grSCAD")
+#print(system.time(sim_result_grLasso <- goooglePlus(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), penalty = "grLasso")))
+#sim_result_grMCP <- goooglePlus(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), penalty = "grMCP")
+#sim_result_grSCAD <- goooglePlus(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), penalty = "grSCAD")
 #print("LASSO")
 #print(sim_result_grLasso$coefficients)
-print(sim_result_grLasso$bic)
+#print(sim_result_grLasso$bic)
 #print("MCP")
 #print(sim_result_grMCP$coefficients)
 #print(sim_result_grMCP$bic)
 #print("SCAD")
 #print(sim_result_grSCAD$coefficients)
 #print(sim_result_grSCAD$bic)
-
-print(system.time(sim_result_grLasso_old <- gooogle(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), dist = "poisson", penalty = "grLasso")))
+library(Gooogle)
+#print(system.time(sim_result_grLasso_old <- gooogle(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), dist = "poisson", penalty = "grLasso")))
 #print(sim_result_grLasso_old$coefficients)
-sim_result_grMCP_old <- gooogle(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), dist = "poisson", penalty = "grMCP")
-sim_result_grSCAD_old <- gooogle(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), dist = "poisson", penalty = "grSCAD")
+#sim_result_grMCP_old <- gooogle(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), dist = "poisson", penalty = "grMCP")
+#sim_result_grSCAD_old <- gooogle(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), dist = "poisson", penalty = "grSCAD")
+library(outliers)
+library(forecast)
+
+b.mean <- function(vec, num, na.rm = TRUE) {
+    # Remove missing values if na.rm is TRUE
+    if (na.rm) vec <- vec[!is.na(vec)]
+
+    # Remove outliers from the vector
+    vec <- rm.outlier(vec)
+    # Generate resamples using lapply
+    resamples <- lapply(1:num, function(i) sample(vec, replace = TRUE))
+
+    # Calculate mean of each resample using sapply
+    r.mean <- sapply(resamples, mean)
+
+    # Calculate standard error
+    std.err <- sqrt(var(r.mean))
+
+    # Round standard error and return
+    return(round(std.err, 2))
+}
+
+#' Title
+#'
+#' @description For a given training and test dataset and the fitted coefficients this function calculates MAE and MASE
+#' @param train Training dataset obtained from the original dataset
+#' @param test Complement of the training dataset used for prediction
+#' @param fit The output of the function fit.method
+#' @param yvar Name of the outcome variable
+#' @param xvars Name of the predictor variables for the count model
+#' @param zvars Name of the predictor variables for the zero model
+#'
+#' @return The predictive measures MAE and MASE calculated from the function accuracy of the forecast package
+measures.func <- function(train, test, fit, yvar, xvars, zvars) {
+    # Check if fit is missing (NA)
+    # Extract coefficients
+    betahat <- fit$coefficients$count
+    gammahat <- fit$coefficients$zero
+
+    # Calculate predicted phi
+    z.test <- as.matrix(cbind(1, test[, zvars]))
+    phi.hat <- 1 / (1 + exp(-z.test %*% gammahat))  # Calculate phi.hat
+
+    # Calculate predicted lambda
+    x.test <- as.matrix(cbind(1, test[, xvars]))
+    lam.hat <- exp(x.test %*% betahat)
+
+    # Calculate predicted y
+    y.pred <- (1 - phi.hat) * lam.hat
+
+    # Extract actual y values
+    y.test <- test[, yvar]
+    y.train <- train[, yvar]
+
+    # Create forecast object
+    forecast <- structure(list(mean = y.pred, fitted = y.test, x = y.train), class = "forecast")
+
+    # Calculate accuracy measures (MCC and AUC) and round to 4 decimals
+    measures <- c(round(accuracy(forecast, y.test)[2, c(3, 6)], 4))
+
+
+    # Return the measures
+    return(measures)
+}
+
+#' Title
+#'
+#' @description This function fits the ZINB model with different penalties to the training part of a dataset and calculates MAE and MASE from the test set. It outputs the median of MAE and MASE over all the simulated datasets
+#' @param fit.method the function being used to fit the model
+#' @param n.train Sample size in the training dataset
+#' @param data.list output of datagen.sim.all
+#' @param method Different penalties
+#' @param ITER Number of simulations
+#' @param group Vector containing grouping structure of the covariates
+#'
+#' @return The median of MAE and MASE, calculated over all the simulated datasets
+measures.summary <- function(fit.method, n.train, data.list, method, ITER, group) {
+    # Suppress warnings during iteration
+    options(warn = -1)
+
+    # Initialize measures matrix
+    measures.mat <- NULL
+
+    # Iterate over repetitions
+    for (i in 1:ITER) {
+        # Extract data for current iteration
+        dataset <- data.list[[i]]
+        train <- dataset$data[1:n.train, ]
+        test <- dataset$data[-(1:n.train), ]
+
+        # Extract variables
+        yvar <- dataset$yvar
+        xvars <- dataset$xvars
+        zvars <- dataset$zvars
+
+        # Fit the model and capture time
+        time.taken <- system.time(fit.summary <- fit.method(data = train, yvar = yvar, xvars = xvars, zvars = zvars, penalty = method, dist = "poisson", group = group))
+
+        # Predict measures for the test set
+        predict.measures <- measures.func(train = train, test = test, fit = fit.summary, yvar = yvar, xvars = xvars, zvars = zvars)
+
+        # Append measures and time to the matrix
+        measures.mat <- rbind(measures.mat, c(predict.measures, time.taken[3]))
+    }
+
+    # Calculate standard errors using b.mean with bootstrapping
+    print(measures.mat)
+    measures.se <- t(apply(apply(measures.mat[, -3], 2, function(x) return(as.numeric(x))), 2, b.mean, num = 1000, na.rm = TRUE))
+
+    # Calculate medians for each measure
+    measures.median <- apply(measures.mat, 2, function(x) { median(x, na.rm = TRUE) })
+
+    # Summarize MAE with median and standard error
+    mae.summary <- paste(round(measures.median[1], 3), "(", round(measures.se[1], 3), ")", sep = "")
+
+    # Summarize MASE with median and standard error
+    mase.summary <- paste(round(measures.median[2], 3), "(", round(measures.se[2], 3), ")", sep = "")
+
+    # Combine results into output structure
+    output <- c(MAE = mae.summary, MASE = mase.summary, time.taken = measures.median[3])
+
+    # Restore warning settings
+    options(warn = 0)
+
+    # Return the summary output
+    return(output)
+}
+
+data.list <- lapply(1:10, function(i) {
+    return(gen_zip_data(200, 50, rep.int(8, 5), 0.1, 0.4, i))
+})
+
+simulation_results_gooogleplus <- measures.summary(goooglePlus, 200, data.list, "grLasso", 5, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)))
+print(simulation_results_gooogleplus)
+simulation_results_gooogle <- measures.summary(gooogle, 200, data.list, "grLasso", 5, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)))
+print(simulation_results_gooogle)
