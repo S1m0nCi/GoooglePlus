@@ -1,3 +1,12 @@
+library(pscl)
+library(vscDebugger)
+library(glmnet)
+library(mpath)
+library(rockchalk)
+library(grpreg)
+library(MASS)
+library(stringr)
+library(gamlss.dist)
 # nolint start
 #' PD approximation of a matrix.
 #'
@@ -7,23 +16,26 @@
 #'
 #' @return The function returns a modified matrix which is pd.
 #'
-makePD <- function(mat) {
-  D <- eigen(mat)
-  E <- D$values
-  v <- as.numeric(E < 0)
-  idx <- which(v == 1)
-  m <- sum(v) # number of negative values
-  if (m > 0) {
-    S <- sum(v * E) * 2
-    W <- (S * S * 100) + 1
-    P <- min(abs(E[idx])) # smallest positive value
+makePD = function(mat){
+  N = nrow(mat)
+  HC = mat
+  D = eigen(mat)
+  E = D$values
+  U = D$vectors
+  v = as.numeric(E < 0)
+  idx = which(v==1)
+  m = sum(v) # number of negative values
+  if(m > 0){
+    S = sum(v*E)*2
+    W = (S*S*100)+1
+    P = min(abs(E[idx])) # smallest positive value
     for(i in idx){
-      C <- E[i]
-      E[i] <- P * (S - C) * (S - C) / W
+      C = E[i]
+      E[i] = P * (S-C)*(S-C)/W
     }
   }
   return(E)
-}
+  }
 
 
 #' Function for the final model
@@ -41,31 +53,22 @@ makePD <- function(mat) {
 #'
 #' @export
 #'
-fit.final.func <- function(fit, crit) {
-  # Find the index of the model with the minimum criterion value
-  fit.final.idx <- which.min(get(crit)(fit))
+fit.final.func<-function(fit,crit)
+{
+  fit.final.idx<-which.min(get(crit)(fit))
+  fit.final.aic<-AIC(fit)[fit.final.idx]
+  fit.final.bic<-BIC(fit)[fit.final.idx]
+  fit.final.loglik<-logLik(fit)[fit.final.idx]
+  fit.final.coeff<-fit$beta[,fit.final.idx]
 
-  # Extract relevant information from the best fitting model
-  fit.final.aic <- AIC(fit)[fit.final.idx]
-  fit.final.bic <- BIC(fit)[fit.final.idx]
-  fit.final.loglik <- logLik(fit)[fit.final.idx]
-  fit.final.coeff <- fit$beta[, fit.final.idx]
+  fit.final.coeff.count<-fit.final.coeff[str_sub(names(fit.final.coeff),start = -5)=="count"]
+  names(fit.final.coeff.count)<-substr(names(fit.final.coeff.count),1,nchar(names(fit.final.coeff.count))-6)
+  fit.final.coeff.zero<-fit.final.coeff[str_sub(names(fit.final.coeff),start = -4)=="zero"]
+  names(fit.final.coeff.zero)<-substr(names(fit.final.coeff.zero),1,nchar(names(fit.final.coeff.zero))-5)
 
-  # Extract coefficients containing "count" in the name
-  fit.final.coeff.count <- fit.final.coeff[str_sub(names(fit.final.coeff), start = -5) == "count"]
-  names(fit.final.coeff.count) <- substr(names(fit.final.coeff.count), 1, nchar(names(fit.final.coeff.count)) - 6)
-
-  # Extract coefficients containing "zero" in the name
-  fit.final.coeff.zero <- fit.final.coeff[str_sub(names(fit.final.coeff), start = -4) == "zero"]
-  names(fit.final.coeff.zero) <- substr(names(fit.final.coeff.zero), 1, nchar(fit.final.coeff.zero) - 5)
-
-  return(list(
-    coefficients = list(count = fit.final.coeff.count, zero = fit.final.coeff.zero),
-    aic = fit.final.aic,
-    bic = fit.final.bic,
-    loglik = fit.final.loglik
-  ))
+  return(list(coefficients=list(count=fit.final.coeff.count,zero=fit.final.coeff.zero),aic=fit.final.aic, bic=fit.final.bic, loglik=fit.final.loglik))
 }
+
 
 
 
@@ -134,174 +137,278 @@ fit.final.func <- function(fit, crit) {
 #' @importFrom gamlss.dist dZIP dZINBI
 #'
 
-gooogle <- function(data, xvars, zvars, yvar, group = 1:ncol(data),
-                   samegrp.overlap = TRUE,
-                   penalty = c("grLasso", "grMCP", "grSCAD", "gBridge"),
-                   dist = c("poisson", "negbin"), nlambda = 100, lambda,
-                   lambda.min = ifelse((nrow(data[, unique(c(xvars, zvars))]) > ncol(data[, unique(c(xvars, zvars))])), 1e-4, .05),
-                   lambda.max, crit = "BIC",
-                   alpha = 1, eps = .001, max.iter = 1000, gmax = length(unique(group)),
-                   gamma = ifelse(penalty == "gBridge", 0.5, ifelse(penalty == "grSCAD", 4, 3)), warn = TRUE)
+gooogle<-function(data,xvars,zvars,yvar,group=1:ncol(data),
+                  samegrp.overlap=T,
+                  penalty=c("grLasso", "grMCP", "grSCAD", "gBridge"),
+                  dist=c("poisson","negbin"), nlambda=100, lambda,
+                  lambda.min=ifelse((nrow(data[,unique(c(xvars,zvars))])>ncol(data[,unique(c(xvars,zvars))])),1e-4,.05), lambda.max, crit="BIC",
+                  alpha=1, eps=.001, max.iter=1000, gmax=length(unique(group)),
+                  gamma=ifelse(penalty=="gBridge",0.5,ifelse(penalty == "grSCAD", 4, 3)), warn=TRUE)
 {
-  # getting the appropriate columns from the data frame - 1d output only
-  y <- data.frame(data[, yvar])
-  X <- data.frame(data[, xvars])
-  # getting all of the explanatory variables: count-influencing and zero-inflation-influencing
-  pred.names <- union(xvars, zvars)
-  # renaming
-  names(X) <- paste(names(X), ".count", sep = "")
-  names(y) <- yvar
-  # gets the groups of each explanatory variable into a list of group nums format
-  group.x <- group[which(pred.names %in% xvars)]  # group of xvars
-  n <- nrow(data)
+  ll.func<-function(beta.count,beta.zero,y,X,Z,dist)
+  {
+    y<-as.numeric(y[,1])
 
-  if (is.null(zvars)) {  # if there is no covariate in the zero model
-    Z <- NULL
-    group.z <- NULL
-    data <- cbind.data.frame(y, X)
-    xvars <- names(X)
-    fit.formula <- as.formula(paste(yvar, "~", paste(paste(xvars, collapse = "+"), "|1"), sep = ""))
+    if (dist=="negbin") theta<-a
+
+    if (is.null(Z))
+    {
+      zgam<-rep(beta.zero,length(y))
+    } else {
+      zgam<-as.matrix(cbind(1,Z))%*%beta.zero
+      zgam<-as.numeric(zgam[,1])
+    }
+    pzero<-exp(zgam)/(1+exp(zgam))
+
+    xbet<-as.matrix(cbind(1,X))%*%beta.count
+    xbet<-as.numeric(xbet[,1])
+    mu<-exp(xbet)
+
+    if (dist=="poisson"){
+      ll<-try(sum(dZIP(y,mu=mu,sigma=pzero,log=T)),silent = T)
+    } else {
+      ll<-try(sum(dZINBI(y,mu=mu,sigma=1/theta,nu=pzero,log=T)),silent = T)
+    }
+    if (class(ll)=="try-error")
+    {
+      ll<-NA
+    }
+    return(ll)
+  }
+
+  y<-data.frame(data[,yvar])
+  X<-data.frame(data[,xvars])
+  pred.names<-union(xvars,zvars)
+  names(X)<-paste(names(X),".count",sep="")
+  names(y)<-yvar
+  group.x<-group[which(pred.names %in% xvars)] #group of xvars
+  n<-nrow(data)
+  if (is.null(zvars)) #if there is no covariate in the zero model
+  {
+    Z<-NULL
+    group.z<-NULL
+    data<-cbind.data.frame(y,X)
+    xvars<-names(X)
+    fit.formula<-as.formula(paste(yvar,"~",paste(paste(xvars,collapse="+"),"|1"),sep=""))
   } else {
-    Z <- data.frame(data[, zvars])
-    # rename Z dataframe
-    names(Z) <- paste(names(Z), ".zero", sep = "")
+    Z<-data.frame(data[,zvars])
+    names(Z)<-paste(names(Z),".zero",sep="")
 
-    # the below code just ensures no overlap of X and Z group numbers: they are treated as completely separate groups: hence we add the max of groups x to ensure none are shared
-    if (samegrp.overlap) {  # if X and Z assign same groups for shared covariates
-      group.z <- group[which(pred.names %in% zvars)]
+    if (samegrp.overlap) # if X and Z assign same groups for shared covariates
+    {
+      group.z<-group[which(pred.names %in% zvars)]
     } else {
-      group.z <- max(group.x) + group[which(pred.names %in% zvars)]
+      group.z<-max(group.x)+group[which(pred.names %in% zvars)]
     }
-    # cbind - bind colums (rbind - bind rows)
-    data <- cbind.data.frame(y, X, Z)
-    xvars <- names(X)
-    zvars <- names(Z)
-    # "|" separates count model | zero inflation model
-    fit.formula <- as.formula(paste(yvar, "~", paste(paste(xvars, collapse = "+"), "|", paste(zvars, collapse = "+")), sep = ""))
+    data<-cbind.data.frame(y,X,Z)
+    xvars<-names(X)
+    zvars<-names(Z)
+    fit.formula<-as.formula(paste(yvar,"~",paste(paste(xvars,collapse="+"),"|",paste(zvars,collapse="+")),sep=""))
   }
-  # the reason for doing all of the above, as we see in the 'Insurance' example of calling gooogle, is because we usually will set zvars = xvars, but in general the zeroinf
-  # explanatory variables and the count explanatory variables may not be in the same groups.
+  fit.zero <- zeroinfl(fit.formula, dist=dist,data = data)
+  b2.mle<-c(fit.zero$coefficients$count[-1],fit.zero$coefficients$zero[-1])
 
-  # use zeroinfl to fit a model, which is part of pscl: this requires "|" in the formula as has been set above - that is the reason why we did it all
-  fit.zero <- zeroinfl(fit.formula, dist = dist, data = data)
-  # get the mle
-  b2.mle <- c(fit.zero$coefficients$count[-1], fit.zero$coefficients$zero[-1])
+  vcov<-fit.zero$vcov
+  p<-length(xvars)
 
-  # get the covariance matrix needed for transforming the data
-  vcov <- fit.zero$vcov
-  p <- length(xvars)
+  if (dist=="poisson")
+  {
+    sigma.11<-vcov[c(1,p+2),c(1,p+2)]
+    sigma.12<-vcov[c(1,p+2),-c(1,p+2)]
+    sigma.22<-vcov[-c(1,p+2),-c(1,p+2)]
 
-  if (dist == "poisson") {
-    sigma.11 <- vcov[c(1, p + 2), c(1, p + 2)]
-    sigma.12 <- vcov[c(1, p + 2), -c(1, p + 2)]
-    sigma.22 <- vcov[-c(1, p + 2), -c(1, p + 2)]
+    vcov.bar<-sigma.22-t(sigma.12)%*%ginv(sigma.11)%*%sigma.12
 
-    vcov.bar <- sigma.22 - t(sigma.12) %*% ginv(sigma.11) %*% sigma.12
-
-    e <- eigen(vcov.bar)
-    if (det(vcov.bar) > 0) {  # in case vcov is not pd add small values to the diagonal
-      cov.star <- e$vectors %*% diag(1 / sqrt(abs(e$values))) %*% t(e$vectors)
+    e<-eigen(vcov.bar)
+    if(det(vcov.bar)>0) # in case vcov is not pd add small values to the diagonal
+    {
+      cov.star=e$vectors%*%diag(1/sqrt(abs(e$values)))%*%t(e$vectors)
     } else {
-      cov.star <- e$vectors %*% diag(1 / sqrt(makePD(vcov.bar))) %*% t(e$vectors)
+      cov.star=e$vectors%*%diag(1/sqrt(makePD(vcov.bar)))%*%t(e$vectors)
     }
 
-    y.star <- cov.star %*% b2.mle  # transformed y
-    cov.star <- data.frame(cov.star)  # scaled x matrix
-    names(cov.star) <- c(xvars, zvars)
+    y.star<-cov.star%*%b2.mle # transformed y
+    cov.star<-data.frame(cov.star) # scaled x matrix
+    names(cov.star)<-c(xvars,zvars)
 
-    # reorder the group index and the covariates
-    group <- c(group.x, group.z)
-    u <- unique(group)
-    cov.star.reordered <- rep(0, dim(cov.star)[1])
-    for (i in 1:length(u)) {
-      index <- which(group == u[i])
-      cov.star.reordered <- cbind(cov.star.reordered, cov.star[, index])
+    ## reorder the group index and the covariates
+    group<-c(group.x,group.z)
+    u<-unique(group)
+    cov.star.reordered<-rep(0,dim(cov.star)[1])
+    for(i in 1:length(u))
+    {
+      index<-which(group==u[i])
+      cov.star.reordered<-cbind(cov.star.reordered,cov.star[,index])
     }
-    cov.star.reordered <- cov.star.reordered[, -1]
-    group <- sort(group)
+    cov.star.reordered<-cov.star.reordered[,-1]
+    group<-sort(group)
 
-    if (penalty == "gBridge") {
-      fit <- gBridge(X = cov.star.reordered, y = y.star, group = group, gamma = gamma)
+    if (penalty=="gBridge")
+    {
+      fit<-gBridge(X=cov.star.reordered, y=y.star, group=group, gamma=gamma)
+
     } else {
-      fit <- grpreg(cov.star.reordered, y.star, group = group, penalty = penalty,
-                    family = "gaussian", nlambda = nlambda, lambda,
-                    lambda.min = lambda.min, alpha = alpha, eps = eps,
-                    max.iter = max.iter, gmax = gmax, gamma = gamma, warn = warn)
+      fit=grpreg(cov.star.reordered,y.star,group=group,penalty=penalty,family="gaussian", nlambda=nlambda, lambda, lambda.min=lambda.min,  alpha=alpha, eps=eps, max.iter=max.iter,gmax=gmax, gamma=gamma, warn=warn)
     }
-  } else if (dist == "negbin") {
-    sigma.11 <- vcov[c(1, p + 2), c(1, p + 2)]
-    sigma.12 <- vcov[c(1, p + 2), -c(1, p + 2)]
-    sigma.22 <- vcov[-c(1, p + 2), -c(1, p + 2)]
+  } else if(dist=="negbin") {
+    sigma.11<-vcov[c(1,p+2),c(1,p+2)]
+    sigma.12<-vcov[c(1,p+2),-c(1,p+2)]
+    sigma.22<-vcov[-c(1,p+2),-c(1,p+2)]
 
-    vcov.bar <- try(sigma.22 - t(sigma.12) %*% ginv(sigma.11) %*% sigma.12, silent = TRUE)
+    vcov.bar<-try(sigma.22-t(sigma.12)%*%ginv(sigma.11)%*%sigma.12,silent=T)
 
-    a <- 1 / fit.zero$theta
-    var.a <- (fit.zero$SE.logtheta)^2 * exp(2 * log(a))
+    a<-1/fit.zero$theta
+    var.a<-(fit.zero$SE.logtheta)^2*exp(2*log(a))
 
-    e <- eigen(vcov.bar)
+    e<-eigen(vcov.bar)
 
-    if (round(det(vcov.bar), 4) > 0) {  # transform vcov to pd if it's not
-      cov.star <- e$vectors %*% diag(1 / sqrt(abs(e$values))) %*% t(e$vectors)
+    if(round(det(vcov.bar),4)>0) # transform vcov to pd if it's not
+    {
+      cov.star=e$vectors%*%diag(1/sqrt(abs(e$values)))%*%t(e$vectors)
     } else {
-      cov.star <- e$vectors %*% diag(1 / sqrt(makePD(vcov.bar))) %*% t(e$vectors)
+      cov.star=e$vectors%*%diag(1/sqrt(makePD(vcov.bar)))%*%t(e$vectors)
     }
-    y.star <- cov.star %*% b2.mle
-    cov.star <- data.frame(cov.star)  # scaled x matrix
-    names(cov.star) <- c(xvars, zvars)
+    y.star<-cov.star%*%b2.mle
+    cov.star<-data.frame(cov.star) # scaled x matrix
+    names(cov.star)<-c(xvars,zvars)
 
-    group <- c(group.x, group.z)  # 0 indicator correspond to disperison and intercept terms
-    u <- unique(group)
-    # reorder the group index and the covariates
-    cov.star.reordered <- rep(0, dim(cov.star)[1])
-    for (i in 1:length(u)) {
-      index <- which(group == u[i])
-      cov.star.reordered <- cbind(cov.star.reordered, cov.star[, index])
+    group<-c(group.x,group.z) # 0 indicator correspond to disperison and intercept terms
+    u<-unique(group)
+    ## reorder the group index and the covariates
+    cov.star.reordered<-rep(0,dim(cov.star)[1])
+    for(i in 1:length(u))
+    {
+      index<-which(group==u[i])
+      cov.star.reordered<-cbind(cov.star.reordered,cov.star[,index])
     }
-    cov.star.reordered <- cov.star.reordered[,-1]
-    group <- sort(group)
+    cov.star.reordered<-cov.star.reordered[,-1]
+    group<-sort(group)
 
-    if (penalty == "gBridge") {
-      fit <- gBridge(X = cov.star.reordered, y = y.star, group = group, gamma = gamma)
+    if (penalty=="gBridge")
+    {
+      fit<-gBridge(X=cov.star.reordered, y=y.star, group=group, gamma=gamma)
+
     } else {
-      fit <- grpreg(
-        cov.star.reordered,
-        y.star,
-        group = group,
-        penalty = penalty,
-        family = "gaussian",
-        nlambda = nlambda,
-        lambda = lambda,
-        lambda.min = lambda.min,
-        alpha = alpha,
-        eps = eps,
-        max.iter = max.iter,
-        gmax = gmax,
-        gamma = gamma,
-        warn = warn
-      )
+      fit=grpreg(cov.star.reordered,y.star,group=group,penalty=penalty,family="gaussian", nlambda=nlambda, lambda, lambda.min=lambda.min,  alpha=alpha, eps=eps, max.iter=max.iter, gmax=gmax, gamma=gamma, warn=warn)
     }
-
-    if (dist != "poisson") stop("Gooogle only works with Poisson or Negative Binomial distribution for count data")
-
-    fit.final <- fit.final.func(fit = fit, crit = crit)
-    b2.final <- c(fit.final$coefficients$count, fit.final$coefficients$zero)
-    b1.final <- sigma.12 %*% solve(sigma.22) %*% (b2.mle - b2.final)
-    fit.final.coeff.count <- c(intercept = b1.final[1], fit.final$coefficients$count)
-    fit.final.coeff.zero <- c(intercept = b1.final[2], fit.final$coefficients$zero)
-
-    dfc <- sum(fit.final.coeff.count != 0)
-    dfz <- sum(fit.final.coeff.count != 0)
-    ll <- ll.func(fit.final.coeff.count, fit.final.coeff.zero, y, X, Z, dist = dist)
-    aic <- -2 * ll + 2 * (dfc + dfz)
-    bic <- -2 * ll + log(n) * (dfc + dfz)
-
-    if (dist == "poisson") {
-      coeff.final <- list(count = fit.final.coeff.count, zero = fit.final.coeff.zero)
-    } else {
-      coeff.final <- list(count = fit.final.coeff.count, zero = fit.final.coeff.zero, dispersion = a)
-    }
-
-    return(list(coefficients = coeff.final, aic = aic, bic = bic, loglik = ll))
+  } else {
+    stop("Gooogle only works with Poisson or Negative Binomial distribution for count data")
   }
+
+    fit.final<-fit.final.func(fit=fit,crit=crit)
+    b2.final<-c(fit.final$coefficients$count,fit.final$coefficients$zero)
+    b1.final<-sigma.12%*%solve(sigma.22)%*%(b2.mle-b2.final)
+    fit.final.coeff.count<-c(intercept=b1.final[1],fit.final$coefficients$count)
+    fit.final.coeff.zero<-c(intercept=b1.final[2],fit.final$coefficients$zero)
+
+    dfc<-sum(fit.final.coeff.count!=0)
+    dfz<-sum(fit.final.coeff.count!=0)
+    ll<-ll.func(fit.final.coeff.count,fit.final.coeff.zero,y,X,Z,dist=dist)
+    aic<--2*ll+2*(dfc+dfz)
+    bic<--2*ll+log(n)*(dfc+dfz)
+
+    if (dist=="poisson"){
+      coeff.final=list(count=fit.final.coeff.count,zero=fit.final.coeff.zero)
+    } else {
+      coeff.final=list(count=fit.final.coeff.count,zero=fit.final.coeff.zero,dispersion=a)
+    }
+
+    return(list(coefficients=coeff.final,aic=aic, bic=bic, loglik=ll, lambda=fit$lambda))
 }
 # nolint end
+
+gen_zip_data <- function(
+    n.train,
+    n.test,
+    grpsize,
+    rho,
+    phi,
+    seedval
+) {
+    # Define beta
+    beta <- c(-1, -0.5, -0.25, -0.1, 0.1, 0.25, 0.5, 0.75, rep(0.2, 8), rep(0, 24))
+    beta <- c(5, beta)
+
+    # Define gamma
+    gamma <- c(-0.4, -0.3, -0.2, -0.1, 0.1, 0.2, 0.3, 0.4, rep(0.2, 8), rep(0, 24))
+
+    # Adjust gamma based on phi
+    if (phi == 0.3) gamma <- c(-1, gamma)
+    if (phi == 0.4) gamma <- c(-0.5, gamma)
+    if (phi == 0.5) gamma <- c(0, gamma)
+
+    # Set seed if provided
+    if (!is.null(seedval)) set.seed(seedval)
+
+    # Define n, p, and ngrp
+    n <- n.train + n.test
+    p <- sum(grpsize)
+    ngrp <- length(grpsize)
+
+    # Generate random normal matrix (R)
+    R <- matrix(rnorm(n * p), n, p)
+
+    # Create correlation matrix (V)
+    V <- matrix(0, ngrp, ngrp)
+    for (i in 1:ngrp) {
+        for (j in 1:ngrp) {
+            V[i, j] <- rho^(abs(i - j))
+        }
+    }
+
+    # Generate multivariate normal matrix (Z)
+    Z <- mvrnorm(n, mu = rep(0, ngrp), Sigma = V)
+
+    # Create design matrix (X)
+    X <- matrix(0, n, p)
+    for (g in 1:ngrp) {
+        for (j in 1:grpsize[g]) {
+            X[, (g - 1) * grpsize[g] + j] <- (Z[, g] + R[, (g - 1) * grpsize[g] + j]) / sqrt(2)
+        }
+    }
+
+    # Standardize X
+    X <- scale(X)
+
+    # Set column names for X
+    colnames(X) <- paste("X", c(1:ncol(X)), sep = "")
+
+    # Define variable names
+    xvars <- colnames(X)
+    zvars <- xvars
+
+    # Capture zero inflation (if seedval is null)
+    if (is.null(seedval)) {
+        rn <- round(runif(1) * 10^5)
+        set.seed(rn)
+        y <- rzi(n = n, x = X, z = X, a = beta, b = gamma, family = "poisson")
+
+        set.seed(rn)
+        # Capture from console output
+        yout <- capture.output(rzi(n, x = X, z = X, a = beta, b = gamma, family = "poisson"))
+        zeroinfl <- as.numeric(substring(yout[1], 15))
+    } else {
+        y <- rzi(n = n, x = X, z = X, a = beta, b = gamma, family = "poisson")
+
+        # Capture from console output
+        yout <- capture.output(rzi(n, x = X, z = X, a = beta, b = gamma, family = "poisson"))
+        zeroinfl <- as.numeric(substring(yout[1], 15))
+    }
+
+    # Combine data into a data frame
+    data <- cbind.data.frame(y, X)
+
+    # Return list
+    return(list(data = data, yvar = "y", xvars = xvars, zvars = zvars, zeroinfl = zeroinfl))
+}
+
+# let us run one simulation
+# 40 variables: this is decided in the data generation
+output <- gen_zip_data(200, 50, rep.int(8, 5), 0.1, 0.4, 200)
+data <- output$data
+yvar <- output$yvar
+xvars <- output$xvars
+zvars <- output$zvars
+
+print(system.time(sim_result_grLasso_g <- gooogle(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), dist = "poisson", penalty = "grLasso")))
+print(sim_result_grLasso_g$lambda)
