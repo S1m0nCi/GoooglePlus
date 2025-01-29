@@ -102,6 +102,13 @@ goooglePlus <-  function(
     pseudo_X <- pseudo_factor
     pseudo_Y <- as.vector(pseudo_factor %*% b2.mle)
 
+    # standardise pseudo_X (not pseudo_Y)
+    # scale only and do not centre as we do not want to produce another intercept
+    X_std <- standardise(pseudo_X)
+    pseudo_X <- X_std$scaled_X
+    X_scale <- X_std$s
+    fit.coefficients <- fit.coefficients / sqrt(mean(fit.coefficients ^ 2))
+
     # reorder the group index and the covariates
     group <- c(0, group.x, 0, group.z)
 
@@ -185,13 +192,13 @@ goooglePlus <-  function(
         penalty = penalty
     )
 
-    # Step 1: De-orthonormalise and unorder coefficients
+    # Step 1: De-orthonormalise and unorder coefficients and de-scale
     coefficients_list <- lapply(orthonormalised_coefficients_list, function(coeff) {
-        return(deorthonormalise_coefficients(
+        return((deorthonormalise_coefficients(
             coeff,
             orthonormalisation_factors,
             group_start_indices
-        )[unordering_indices])
+        )[unordering_indices]) / X_scale)
     })
 
     mat_X <- as.matrix(cbind(1, X))
@@ -241,25 +248,75 @@ goooglePlus <-  function(
 }
 
 orthonormalise_full_matrix <- function(all_groups_matrix, group_start_indices) {
-    num_cols <- ncol(all_groups_matrix)
-    orthonormalised_matrix <- matrix(, nrow = nrow(all_groups_matrix), ncol = num_cols)
+    n <- nrow(all_groups_matrix)
+    orthonormalised_matrix <- matrix(0, nrow = n, ncol = ncol(all_groups_matrix))
     matrix_factors <- vector("list", length(group_start_indices))
     intercept_factors <- numeric(group_start_indices[2] - group_start_indices[1])
     for (i in group_start_indices[1]:(group_start_indices[2] - 1)) {
-        orth_intercept <- orthonormalise_intercept_vector(all_groups_matrix[, i])
+        orth_intercept <- svd_intercept_vector(all_groups_matrix[, i], n)
         orthonormalised_matrix[, i] <- orth_intercept[[1]]
         intercept_factors[i] <- orth_intercept[[2]]
     }
     matrix_factors[[1]] <- intercept_factors
     for (i in 2:(length(group_start_indices) - 1)) {
         # get the matrix:
-        group_matrix <- all_groups_matrix[, group_start_indices[i]:(group_start_indices[i + 1] - 1), drop = FALSE]
-        orth_group_matrix_and_factor <- orthonormalise_group_matrix(group_matrix)
+        group_matrix <- all_groups_matrix[, group_start_indices[i]:(group_start_indices[i + 1] - 1)]
+        orth_group_matrix_and_factor <- svd_group_matrix(group_matrix, n)
         orthonormalised_group_matrix <- orth_group_matrix_and_factor[[1]]
         matrix_factors[[i]] <- orth_group_matrix_and_factor[[2]]
         orthonormalised_matrix[, group_start_indices[i]:(group_start_indices[i + 1] - 1)] <- orthonormalised_group_matrix
     }
     return(list(orthonormalised_matrix, matrix_factors))
+}
+
+svd_group_matrix <- function(matrix, n) {
+    svdresult <- svd(matrix, nu = 0)
+    # r <- which(svdresult$d > 1e-10)
+    matrix_factor <- sqrt(n) * svdresult$v %*% diag(vapply(svdresult$d, function(num) {
+        return(1 / num)
+    }, numeric(1)))
+    matrix_and_factor <- vector("list", 2)
+    matrix_and_factor[[1]] <- matrix %*% matrix_factor
+    matrix_and_factor[[2]] <- matrix_factor
+    return(matrix_and_factor)
+}
+
+svd_intercept_vector <- function(vect, n) {
+    svdresult <- svd(vect, nu = 0)
+    vfactor <- sqrt(n) * svdresult$v * 1 / svdresult$d
+    return(list(
+        vect %*% vfactor,
+        vfactor
+    ))
+}
+
+orthogonalize <- function(X, group) {
+    n <- nrow(X)
+    J <- max(group)
+    T <- vector("list", J)
+    XX <- matrix(0, nrow=nrow(X), ncol=ncol(X))
+    XX[, which(group==0)] <- X[, which(group==0)]
+    for (j in seq_along(integer(J))) {
+        ind <- which(group==j)
+        if (length(ind)==0) next
+        SVD <- svd(X[, ind, drop=FALSE], nu=0)
+        r <- which(SVD$d > 1e-10)
+        T[[j]] <- sweep(SVD$v[, r, drop=FALSE], 2, sqrt(n)/SVD$d[r], "*")
+        XX[, ind[r]] <- X[, ind] %*% T[[j]]
+    }
+    # do this after function calls to orthonormalise group matrices
+    nz <- !apply(XX==0, 2, all)
+    XX <- XX[, nz, drop=FALSE]
+    attr(XX, "T") <- T
+    attr(XX, "group") <- group[nz]
+    XX
+}
+
+unorthogonalize <- function(b, XX, group, intercept=TRUE) {
+    require(Matrix)
+    ind <- !sapply(attr(XX, "T"), is.null)
+    T <- bdiag(attr(XX, "T")[ind])
+    val <- as.matrix(T %*% b)
 }
 
 orthonormalise_group_matrix <- function(matrix) {
@@ -526,7 +583,7 @@ ll.func <- function(beta.count, beta.zero, y, X, Z, dist)
         ll <- NA
     }
     return(ll)
-    }
+}
 
 # Improvements:
 
