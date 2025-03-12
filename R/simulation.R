@@ -86,7 +86,15 @@ gen_zip_data <- function(
     data <- cbind.data.frame(y, X)
 
     # Return list
-    return(list(data = data, yvar = "y", xvars = xvars, zvars = zvars, zeroinfl = zeroinfl))
+    return(list(data = data,
+                yvar = "y",
+                xvars = xvars,
+                zvars = zvars,
+                zeroinfl = zeroinfl,
+                coefficients = list(
+                    count = beta,
+                    zero = gamma
+                )))
 }
 
 # let us run one simulation
@@ -151,11 +159,16 @@ b.mean <- function(vec, num, na.rm = TRUE) {
 #' @param zvars Name of the predictor variables for the zero model
 #'
 #' @return The predictive measures MAE and MASE calculated from the function accuracy of the forecast package
-measures.func <- function(train, test, fit, yvar, xvars, zvars) {
+measures.func <- function(train, test, fit, yvar, xvars, zvars, beta, gamma) {
     # Check if fit is missing (NA)
     # Extract coefficients
     betahat <- fit$coefficients$count
     gammahat <- fit$coefficients$zero
+
+    # Calculate sensitivity and specificity
+    sensspec <- sens_spec(c(betahat, gammahat), c(beta, gamma))
+    sens <- sensspec$sensitivity
+    spec <- sensspec$specificity
 
     # Calculate predicted phi
     z.test <- as.matrix(cbind(1, test[, zvars]))
@@ -176,8 +189,9 @@ measures.func <- function(train, test, fit, yvar, xvars, zvars) {
     forecast <- structure(list(mean = y.pred, fitted = y.test, x = y.train), class = "forecast")
 
     # Calculate accuracy measures (MCC and AUC) and round to 4 decimals
-    measures <- c(round(accuracy(forecast, y.test)[2, c(3, 6)], 4))
-
+    measures <- c(round(accuracy(forecast, y.test)[2, c(3, 6)], 4),
+                  sensitivity = round(sens, 4),
+                  specificity = round(spec, 4))
 
     # Return the measures
     return(measures)
@@ -212,18 +226,23 @@ measures.summary <- function(fit.method, n.train, data.list, method, group) {
         xvars <- dataset$xvars
         zvars <- dataset$zvars
 
+        # Extract actual coefficients
+        count <- dataset$coefficients$count
+        zero <- dataset$coefficients$zero
+
         # Fit the model and capture time
         time.taken <- system.time(fit.summary <- fit.method(data = train, yvar = yvar, xvars = xvars, zvars = zvars, penalty = method, dist = "poisson", group = group))
 
         # Predict measures for the test set
-        predict.measures <- measures.func(train = train, test = test, fit = fit.summary, yvar = yvar, xvars = xvars, zvars = zvars)
+        predict.measures <- measures.func(train = train, test = test, fit = fit.summary, yvar = yvar, xvars = xvars, zvars = zvars, beta = count, gamma = zero)
 
         # Append measures and time to the matrix
         measures.mat <- rbind(measures.mat, c(predict.measures, time.taken[3]))
     }
+    print(measures.mat)
 
     # Calculate standard errors using b.mean with bootstrapping
-    measures.se <- t(apply(apply(measures.mat[, -3], 2, function(x) return(as.numeric(x))), 2, b.mean, num = 1000, na.rm = TRUE))
+    measures.se <- t(apply(apply(measures.mat[, c(1, 2)], 2, function(x) return(as.numeric(x))), 2, b.mean, num = 1000, na.rm = TRUE))
 
     # Calculate medians for each measure
     measures.median <- apply(measures.mat, 2, function(x) { median(x, na.rm = TRUE) })
@@ -235,7 +254,7 @@ measures.summary <- function(fit.method, n.train, data.list, method, group) {
     mase.summary <- paste(round(measures.median[2], 3), "(", round(measures.se[2], 3), ")", sep = "")
 
     # Combine results into output structure
-    output <- c(MAE = mae.summary, MASE = mase.summary, time.taken = measures.median[3])
+    output <- c(MAE = mae.summary, MASE = mase.summary, measures.median[3], measures.median[4], time.taken = measures.median[5])
 
     # Restore warning settings
     options(warn = 0)
@@ -244,7 +263,25 @@ measures.summary <- function(fit.method, n.train, data.list, method, group) {
     return(output)
 }
 
-data.list <- lapply(1:20, function(i) {
+sens_spec <- function(estimate, actual) {
+    correct_nonzero <- 0
+    correct_zero <- 0
+    for (i in 1:length(estimate)) {
+        if (estimate[i] == 0  && actual[i] == 0) {
+            correct_zero <- correct_zero + 1
+        }
+        else if (estimate[i] != 0 && actual[i] != 0) {
+            correct_nonzero <- correct_nonzero + 1
+        }
+    }
+    return(list(
+        sensitivity = correct_nonzero / sum(actual != 0),
+        specificity = correct_zero / sum(actual == 0)
+    )
+    )
+}
+
+data.list <- lapply(1:100, function(i) {
     return(gen_zip_data(200, 50, rep.int(8, 5), 0.1, 0.4, i))
 })
 
@@ -265,3 +302,7 @@ gooogleplus_scad <- measures.summary(goooglePlus, 200, data.list, "grSCAD", c(re
 print(gooogleplus_scad)
 gooogle_scad <- measures.summary(gooogle, 200, data.list, "grSCAD", c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)))
 print(gooogle_scad)
+
+print("Group ALASSO")
+gooogleplus_alasso <- measures.summary(goooglePlus, 200, data.list, "grALasso", c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)))
+print(gooogleplus_alasso)

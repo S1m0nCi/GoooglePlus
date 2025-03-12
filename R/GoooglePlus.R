@@ -15,7 +15,7 @@ goooglePlus <-  function(
     yvar,
     group = 1:ncol(data),
     samegrp.overlap = TRUE,
-    penalty = c("grLasso", "grMCP", "grSCAD"),
+    penalty = c("grLasso", "grMCP", "grSCAD", "grALasso"),
     dist = c("poisson"),
     nlambda = 100,
     lambda,
@@ -102,6 +102,13 @@ goooglePlus <-  function(
     pseudo_X <- pseudo_factor
     pseudo_Y <- as.vector(pseudo_factor %*% b2.mle)
 
+    # standardise pseudo_X (not pseudo_Y)
+    # scale only and do not centre as we do not want to produce another intercept
+    X_std <- standardise(pseudo_X)
+    pseudo_X <- X_std$scaled_X
+    X_scale <- X_std$s
+    fit.coefficients <- fit.coefficients * X_scale
+
     # reorder the group index and the covariates
     group <- c(0, group.x, 0, group.z)
 
@@ -134,7 +141,18 @@ goooglePlus <-  function(
         # group_matrices[[i]] <- pseudo_X[, group_start_indices[i]:group_start_indices[i + 1] - 1]
         penalty_factors[i] <- sqrt(group_start_indices[i + 1] - group_start_indices[i])
     }
-    # group_matrices[length(unique_groups)] <- pseudo_X[, group_start_indices[length(unique_groups)]:ncol(pseudo_X)]
+
+    if (penalty == "grALASSO") {
+        # length of penalty factors and length of group norms should be the same
+        for (i in 2:(length(group_start_indices) - 1)) {
+            group_norm <- sqrt(sum(fit.coefficients[group_start_indices[i]:group_start_indices[i + 1]]))
+            if (group_norm == 0) {
+                # avoid zero division
+                group_norm <- .Machine$double.eps
+            }
+            penalty_factors[i] <- penalty_factors[i] / group_norm
+        }
+    }
 
     # orthonormalise the group matrices
     group_matrices_orth_full <- orthonormalise_full_matrix(pseudo_X, group_start_indices)
@@ -191,7 +209,7 @@ goooglePlus <-  function(
             coeff,
             orthonormalisation_factors,
             group_start_indices
-        )[unordering_indices])
+        )[unordering_indices] / X_scale)
     })
 
     mat_X <- as.matrix(cbind(1, X))
@@ -242,11 +260,12 @@ goooglePlus <-  function(
 
 orthonormalise_full_matrix <- function(all_groups_matrix, group_start_indices) {
     num_cols <- ncol(all_groups_matrix)
-    orthonormalised_matrix <- matrix(, nrow = nrow(all_groups_matrix), ncol = num_cols)
+    n <- nrow(all_groups_matrix)
+    orthonormalised_matrix <- matrix(, nrow = n, ncol = num_cols)
     matrix_factors <- vector("list", length(group_start_indices))
     intercept_factors <- numeric(group_start_indices[2] - group_start_indices[1])
     for (i in group_start_indices[1]:(group_start_indices[2] - 1)) {
-        orth_intercept <- orthonormalise_intercept_vector(all_groups_matrix[, i])
+        orth_intercept <- svd_intercept_vector(all_groups_matrix[, i], n)
         orthonormalised_matrix[, i] <- orth_intercept[[1]]
         intercept_factors[i] <- orth_intercept[[2]]
     }
@@ -254,7 +273,7 @@ orthonormalise_full_matrix <- function(all_groups_matrix, group_start_indices) {
     for (i in 2:(length(group_start_indices) - 1)) {
         # get the matrix:
         group_matrix <- all_groups_matrix[, group_start_indices[i]:(group_start_indices[i + 1] - 1), drop = FALSE]
-        orth_group_matrix_and_factor <- orthonormalise_group_matrix(group_matrix)
+        orth_group_matrix_and_factor <- svd_group_matrix(group_matrix, n)
         orthonormalised_group_matrix <- orth_group_matrix_and_factor[[1]]
         matrix_factors[[i]] <- orth_group_matrix_and_factor[[2]]
         orthonormalised_matrix[, group_start_indices[i]:(group_start_indices[i + 1] - 1)] <- orthonormalised_group_matrix
@@ -297,6 +316,27 @@ deorthonormalise_coefficients <- function(coeff, matrix_factors, group_start_ind
     return(deorth_coeff)
 }
 
+svd_group_matrix <- function(matrix, n) {
+    svdresult <- svd(matrix, nu = 0)
+    # r <- which(svdresult$d > 1e-10)
+    matrix_factor <- sqrt(n) * svdresult$v %*% diag(vapply(svdresult$d, function(num) {
+        return(1 / num)
+    }, numeric(1)))
+    matrix_and_factor <- vector("list", 2)
+    matrix_and_factor[[1]] <- matrix %*% matrix_factor
+    matrix_and_factor[[2]] <- matrix_factor
+    return(matrix_and_factor)
+}
+
+svd_intercept_vector <- function(vect, n) {
+    svdresult <- svd(vect, nu = 0)
+    vfactor <- sqrt(n) * svdresult$v * 1 / svdresult$d
+    return(list(
+        vect %*% vfactor,
+        vfactor
+    ))
+}
+
 l2_distance <- function(u, v) {
     return(sqrt(sum((u - v) ^ 2)))
 }
@@ -312,17 +352,16 @@ group_coordinate_descent <- function(
     y,
     max_iterations = 1000,
     gamma = ifelse(penalty == "grSCAD", 4, 3),
-    penalty = c("grLasso", "grMCP", "grSCAD")
+    penalty = c("grLasso", "grMCP", "grSCAD", "grALasso")
 ) {
     # we need to output all of the coefficients from the different lambdae
     # we then calculate loss etc using bic later
-    # also need to worry about how to reorder
     # 'coefficients' below may need to be a vector instead of a list
     coefficients_list <- vector("list", length(lambda))
     n <- nrow(group_mat_orth)
     penalty <- match.arg(penalty)
 
-    if (penalty == "grLasso") {
+    if (penalty == "grLasso" || penalty == "grALasso") {
         threshold <- vector_soft_threshold
     } else if (penalty == "grMCP") {
         threshold <- vector_mcp_firm_threshold
@@ -330,22 +369,22 @@ group_coordinate_descent <- function(
         threshold <- vector_scad_firm_threshold
     }
 
-    for (i in 1:length(lambda)) {
-        lam <- lambda[i]
+    standard_deviation_y <- sqrt(sum(y ^ 2) / nrow(group_mat_orth))
+    convergence_threshold <- eps * standard_deviation_y
+    # print(convergence_threshold)
 
+    for (i in 1:length(lambda)) {
         # do not keep coefficients in group structure
-        standard_deviation_y <- sqrt(sum(y ^ 2) / nrow(group_mat_orth))
-        convergence_threshold <- eps * standard_deviation_y
-        penalty_factors <- penalty_factors * lam
+        penalty_factors_i <- penalty_factors * lambda[i]
         r <- y - group_mat_orth %*% initial_b
         current_b <- initial_b
-        for (iterations in 1:max_iterations) {
+        for (iteration in 1:max_iterations) {
             # do the intercepts first. We treat them as separate, not as one group. We just 'store' them as one group.
             max_change <- 0
-            lambda_0 <- penalty_factors[1]
+            lambda_0 <- penalty_factors_i[1]
             for (j in group_start_indices[1]:(group_start_indices[2] - 1)) {
                 b <- current_b[j]
-                X <- group_mat_orth[, group_start_indices[j]] # will not be changed
+                X <- group_mat_orth[, j] # will not be changed
                 z <- (1 / n) * t(X) %*% r + b
                 new_b <- threshold(z, lambda_0, gamma)
                 b_change <- new_b - b
@@ -356,19 +395,19 @@ group_coordinate_descent <- function(
             }
 
             for (j in 2:(length(group_start_indices) - 1)) {
-                lambda_i <- penalty_factors[j]
+                lambda_j <- penalty_factors_i[j]
                 b <- current_b[group_start_indices[j]:(group_start_indices[j + 1] - 1)]
                 X <- group_mat_orth[, group_start_indices[j]:(group_start_indices[j + 1] - 1)] # will not be changed
                 z <- (1 / n) * t(X) %*% r + b
-                new_b <- threshold(z, lambda_i, gamma)
+                new_b <- threshold(z, lambda_j, gamma)
                 b_change <- new_b - b
-                r <- r - X %*% (b_change) # is there an error in the paper by Breheny, which says to use t(X)?
+                r <- r - X %*% b_change # is there an error in the paper by Breheny, which says to use t(X)?
                 b <- new_b
                 current_b[group_start_indices[j]:(group_start_indices[j + 1] - 1)] <- b
                 max_change <- max(max_change, max(abs(b_change)))
             }
 
-            if (max_change < convergence_threshold) {
+            if (max_change < eps) {
                 break
             }
         }
@@ -497,12 +536,6 @@ standardise <- function(X) {
     return(res)
 }
 
-unstandardise_coefficients <- function(coeff, stddev) {
-    beta <- numeric(length(coeff))
-    beta <- coeff / stddev
-    return(beta)
-}
-
 ll.func <- function(beta.count, beta.zero, y, X, Z, dist)
 {
     if (is.null(Z))
@@ -541,6 +574,11 @@ data <- output$data
 yvar <- output$yvar
 xvars <- output$xvars
 zvars <- output$zvars
-sim_result_grLasso <- goooglePlus(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), penalty = "grLasso", lambda_min = 0)
+sim_result_grLasso <- goooglePlus(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), penalty = "grMCP", lambda_min = 0)
 print(sim_result_grLasso$coefficients)
 print(sim_result_grLasso$params[[100]])
+sim_result_grLasso_old <- gooogle(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), penalty = "grMCP", dist = "poisson")
+print(sim_result_grLasso$coefficients)
+print(sim_result_grLasso_old$coefficients)
+
+# print(sim_result_grLasso$params[[1]])
