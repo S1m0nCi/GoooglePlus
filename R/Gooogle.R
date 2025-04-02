@@ -401,14 +401,3 @@ gen_zip_data <- function(
     # Return list
     return(list(data = data, yvar = "y", xvars = xvars, zvars = zvars, zeroinfl = zeroinfl))
 }
-
-# let us run one simulation
-# 40 variables: this is decided in the data generation
-output <- gen_zip_data(200, 50, rep.int(8, 5), 0.1, 0.4, 200)
-data <- output$data
-yvar <- output$yvar
-xvars <- output$xvars
-zvars <- output$zvars
-
-print(system.time(sim_result_grLasso_g <- gooogle(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), dist = "poisson", penalty = "grLasso")))
-print(sim_result_grLasso_g$lambda)

@@ -4,6 +4,8 @@ library(outliers)
 library(forecast)
 library(gamlss.dist)
 
+NUM_SIMULATIONS <- 20
+
 gen_zip_data <- function(
     n.train,
     n.test,
@@ -99,20 +101,20 @@ gen_zip_data <- function(
 
 # let us run one simulation
 # 40 variables: this is decided in the data generation
-output <- gen_zip_data(200, 50, rep.int(8, 5), 0.1, 0.4, 200)
-data <- output$data
-yvar <- output$yvar
-xvars <- output$xvars
-zvars <- output$zvars
+# output <- gen_zip_data(200, 50, rep.int(8, 5), 0.1, 0.4, 200)
+# data <- output$data
+# yvar <- output$yvar
+# xvars <- output$xvars
+# zvars <- output$zvars
 
-print(system.time(sim_result_grLasso <- goooglePlus(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), penalty = "grLasso", lambda_min = 0)))
-print(system.time(sim_result_grLasso_old <- gooogle(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), dist = "poisson", penalty = "grLasso", lambda.min = 0)))
-sim_result_grLasso
-sim_result_grLasso$coefficients
-sim_result_grLasso_old$coefficients
+# print(system.time(sim_result_grLasso <- goooglePlus(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), penalty = "grLasso", lambda_min = 0)))
+# print(system.time(sim_result_grLasso_old <- gooogle(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), dist = "poisson", penalty = "grLasso", lambda.min = 0)))
+# sim_result_grLasso
+# sim_result_grLasso$coefficients
+# sim_result_grLasso_old$coefficients
 
-print(sim_result_grLasso_old$coefficients)
-print(sim_result_grLasso$params[[100]])
+# print(sim_result_grLasso_old$coefficients)
+# print(sim_result_grLasso$params[[100]])
 #sim_result_grLasso$params
 #sim_result_grMCP <- goooglePlus(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), penalty = "grMCP")
 #sim_result_grSCAD <- goooglePlus(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), penalty = "grSCAD")
@@ -188,7 +190,7 @@ measures.func <- function(train, test, fit, yvar, xvars, zvars, beta, gamma) {
     # Create forecast object
     forecast <- structure(list(mean = y.pred, fitted = y.test, x = y.train), class = "forecast")
 
-    # Calculate accuracy measures (MCC and AUC) and round to 4 decimals
+    # Calculate accuracy measures (MCC and AUC) and round to 4 decimal places
     measures <- c(round(accuracy(forecast, y.test)[2, c(3, 6)], 4),
                   sensitivity = round(sens, 4),
                   specificity = round(spec, 4))
@@ -239,7 +241,6 @@ measures.summary <- function(fit.method, n.train, data.list, method, group) {
         # Append measures and time to the matrix
         measures.mat <- rbind(measures.mat, c(predict.measures, time.taken[3]))
     }
-    print(measures.mat)
 
     # Calculate standard errors using b.mean with bootstrapping
     measures.se <- t(apply(apply(measures.mat[, c(1, 2)], 2, function(x) return(as.numeric(x))), 2, b.mean, num = 1000, na.rm = TRUE))
@@ -281,7 +282,7 @@ sens_spec <- function(estimate, actual) {
     )
 }
 
-data.list <- lapply(1:100, function(i) {
+data.list <- lapply(1:NUM_SIMULATIONS, function(i) {
     return(gen_zip_data(200, 50, rep.int(8, 5), 0.1, 0.4, i))
 })
 

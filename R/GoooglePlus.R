@@ -166,7 +166,7 @@ goooglePlus <-  function(
             group_matrix_df <- as.data.frame(group_matrix_orthonormal)
             names(group_matrix_df) <- names(fit.coefficients)
             intercepts_fit <- glm(
-                as.formula(paste(yvar, "~ 0 + count.intercept + zero.intercept")),
+                as.formula(paste("y ~ 0 + count.intercept + zero.intercept")),
                 data = cbind(data.frame(y = unlist(pseudo_Y)), group_matrix_df)
             )
             # will give matrix of 2 cols, instead of vector
@@ -254,8 +254,7 @@ goooglePlus <-  function(
                 log_likelihood = coefficient_log_likelihood[min_bic_index],
                 bic = optimal_bic,
                 coefficients = opt_params,
-                opt_lambda = optimal_lambda,
-                params = coefficients_list))
+                opt_lambda = optimal_lambda))
 }
 
 orthonormalise_full_matrix <- function(all_groups_matrix, group_start_indices) {
@@ -559,7 +558,7 @@ ll.func <- function(beta.count, beta.zero, y, X, Z, dist)
         ll <- NA
     }
     return(ll)
-    }
+}
 
 # Improvements:
 
@@ -569,16 +568,3 @@ ll.func <- function(beta.count, beta.zero, y, X, Z, dist)
 # What if we only scale and do not centre
 
 # Try to remove intercepts as they do
-output <- gen_zip_data(200, 50, rep.int(8, 5), 0.1, 0.4, 200)
-data <- output$data
-yvar <- output$yvar
-xvars <- output$xvars
-zvars <- output$zvars
-sim_result_grLasso <- goooglePlus(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), penalty = "grMCP", lambda_min = 0)
-print(sim_result_grLasso$coefficients)
-print(sim_result_grLasso$params[[100]])
-sim_result_grLasso_old <- gooogle(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), penalty = "grMCP", dist = "poisson")
-print(sim_result_grLasso$coefficients)
-print(sim_result_grLasso_old$coefficients)
-
-# print(sim_result_grLasso$params[[1]])
