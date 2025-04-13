@@ -1,76 +1,14 @@
 library(pscl)
 library(vscDebugger)
-library(gamlss.dist)
-library(roxygen2)
-library(stats)
-
-library(rockchalk)
+library(glmnet)
 library(mpath)
+library(rockchalk)
+library(Gooogle)
+library(outliers)
+library(forecast)
+library(gamlss.dist)
 
-dyn.load("C:\\Users\\gbsim\\Documents\\R-scripts\\GoooglePlus\\src\\gcd.dll")
-
-#' A group regularized fit to the zero inflated count data.
-#'
-#' @description Fit zero inflated count data with a group regularization algorithm.
-#'
-#' @usage gooogleplus(data,xvars,zvars,yvar,group=1:ncol(data),samegrp.overlap=T,penalty=c("grLasso", "grMCP", "grSCAD", "gBridge"),dist=c("poisson","negbin"), nlambda=100, lambda,lambda_min=ifelse((nrow(data[,unique(c(xvars,zvars))])>ncol(data[,unique(c(xvars,zvars))])),1e-4,.05),lambda_max, crit="BIC",alpha=1, eps=.001, max_iter=1000, gamma=ifelse(penalty=="gBridge",0.5,ifelse(penalty == "grSCAD", 4, 3)))
-#'
-#'
-#' @param data The data frame or matrix consisting of outcome and predictors.
-#' @param xvars The vector of variable names to be included in count model.
-#' @param zvars The vector of variable names for excess zero model.
-#' @param yvar The outcome variable name.
-#' @param group The vector of integers describing the grouping of the coefficients. For greatest efficiency and least ambiguity, it is best if group is a vector of consecutive integers. If there are coefficientss to be included in the model without being penalized, assign them to group 0 (or "0").
-#' @param samegrp.overlap A logical argument. If TRUE (default) same grouping indices will be assigned to shared predictors in the count and degenerate distribution.
-#' @param penalty The penalty to be applied in the model. For group level selection, one of "grLasso", "grMCP" or "grSCAD". For bi-level selection "gBridge" can be specified.
-#' @param dist The distribution for count model - "poisson" for poisson or "negbin" for negative binomial.
-#' @param nlambda The number of lambda values. Default is 100.
-#' @param lambda A user specified sequence of lambda values.
-#' @param lambda_min The smallest value for lambda, as a fraction of lambda.max. Default is .0001 if the number of observations is larger than the number of covariates and .05 otherwise.
-#' @param lambda_max The maximum value for lambda (only needed for gBridge penalty).
-#' @param crit The selection criteria for the best model. It can either be "AIC" or \code{BIC} (default).
-#' @param alpha The tuning parameter for the balance between the group penalty and the L2 penalty, as in grpreg. Default value is 1.
-#' @param eps The convergence threshhold.
-#' @param max_iter Maximum number of iterations allowed.
-#' @param gamma Tuning parameter of group MCP/SCAD. Default is 3 for MCP and 4 for SCAD.
-#'
-#' @details The algorithm fits zero inflated count data to conduct variable selection in the presence of intrinsic grouping structure in the predictor set. Group wise penalties are considered for both count and zero abundance part of the mixture model where the likelihood is optimized using group level co-ordinate descent algorithms.
-#'
-#' @return A list containing the following components is returned
-#' \item{log_likelihood}{The log-likelihood of the selected model.}
-#' \item{bic}{The BIC of the selected model.}
-#' \item{coefficients}{A list with two sets of coefficients corresponding to count and zero inflation parts of the mixture model.}
-#' \item{opt_lambda}{The lambda value chosen for the model.}
-#'
-#' @export
-#' @examples
-#' \dontrun{
-#' ## Auto Insurance Claim Data
-#' library(HDtweedie)
-#' data("auto")
-#' y<-auto$y
-#' y<-round(y)
-#' x<-auto$x
-#' data<-cbind.data.frame(y,x)
-#' group=c(rep(1,5),rep(2,7),rep(3,4),rep(4:14,each=3),15:21)
-#' yvar<-names(data)[1]
-#' xvars<-names(data)[-1]
-#' zvars<-xvars
-#'
-#' ## ZIP regression
-#' fit.poisson<-gooogleplus(data=data,yvar=yvar,xvars=xvars,zvars=zvars,group=group,samegrp.overlap=TRUE,dist="poisson",penalty="grLASSO")
-#' fit.poisson$bic
-#'
-#' ## ZINB regression
-#' fit.negbin<-gooogleplus(data=data,yvar=yvar,xvars=xvars,zvars=zvars,group=group,samegrp.overlap=TRUE,dist="negbin",penalty="grLASSO")
-#' fit.negbin$bic
-#' }
-#'
-#' @importFrom pscl zeroinfl
-#' @importFrom stats glm
-#' @importFrom gamlss.dist dZIP dZINBI
-#'
-gooogleplus <-  function(
+goooglePlusO <-  function(
     data,
     xvars,
     zvars,
@@ -87,12 +25,13 @@ gooogleplus <-  function(
     crit = "BIC",
     alpha = 1,
     eps = .001,
-    max_iter = 1000,
-    gamma = ifelse(penalty == "grSCAD", 4, 3), 
-    runtime = c("C", "R", "compare")
+    max.iter = 1000,
+    gmax = length(unique(group)),
+    gamma = ifelse(penalty == "grSCAD", 4, 3),
+    warn = TRUE
 )
 {
-    runtime <- match.arg(runtime)
+
     # getting the appropriate columns from the data frame - 1d output only
     y <- data.frame(data[, yvar])
     X <- data.frame(data[, xvars])
@@ -152,6 +91,7 @@ gooogleplus <-  function(
     b2.mle <- c(fit.zero$coefficients$count, fit.zero$coefficients$zero)
 
     fit.coefficients <- c(fit.zero$coefficients$count, fit.zero$coefficients$zero)
+    zeroinf_residuals <- fit.zero$residuals
     # get the covariance matrix needed for transforming the data
     vcov <- fit.zero$vcov
 
@@ -196,7 +136,7 @@ gooogleplus <-  function(
     # however we will need to orthogonalise and then transform back
 
     # get the group matrices
-    # use 'match' and convert to integer for C conversion
+    # use 'match'
     group_start_indices <- as.integer(c(match(unique_groups, group), length(group) + 1))
     penalty_factors <- numeric(length(unique_groups))
     # the intercepts are to be unpenalised - setting penalisation to 0.
@@ -255,59 +195,28 @@ gooogleplus <-  function(
                 lambda <- seq(lambda_max, lambda_min * lambda_max, length = nlambda)
             }
         }
-    } else {
-        nlambda <- length(lambda)
     }
 
-    if (runtime == "R" || runtime == "compare") {
+    orthonormalised_coefficients_list <- group_coordinate_descent(
+        group_matrix_orthonormal,
+        lambda,
+        penalty_factors,
+        fit.coefficients,
+        zeroinf_residuals,
+        eps,
+        group_start_indices,
+        pseudo_Y,
+        penalty = penalty
+    )
 
-        orthonormalised_coefficients_list <- group_coordinate_descent(
-            group_matrix_orthonormal,
-            lambda,
-            penalty_factors,
-            fit.coefficients,
-            eps,
-            group_start_indices,
-            pseudo_Y,
-            penalty = penalty,
-            max_iterations = max_iter
-        )
-
-        coefficients_list <- lapply(orthonormalised_coefficients_list, function(coeff) {
-            return(deorthonormalise_coefficients(
-                coeff,
-                orthonormalisation_factors,
-                group_start_indices
-            )[unordering_indices] / X_scale)
-        })
-    }
-    if (runtime == "C" || runtime == "compare") {
-        orthonormalised_coefficients_cm <- .Call(
-            "groupCoordinateDescent",
-            group_matrix_orthonormal,
-            lambda,
-            penalty_factors,
-            fit.coefficients,
-            eps,
-            group_start_indices,
-            pseudo_Y,
-            gamma,
-            penalty,
-            as.integer(max_iter)
-        )
-
-        group_start_indices <- group_start_indices + rep(1, length(group_start_indices))
-
-        orthonormalised_coefficients <- matrix(orthonormalised_coefficients_cm, nrow = p + q + 2, ncol = nlambda)
-        # Step 1: De-orthonormalise and unorder coefficients
-        coefficients_list <- apply(orthonormalised_coefficients, 2, function(coeff) {
-            return(deorthonormalise_coefficients(
-                coeff,
-                orthonormalisation_factors,
-                group_start_indices
-            )[unordering_indices] / X_scale)
-        }, simplify = FALSE)
-    }
+    # Step 1: De-orthonormalise and unorder coefficients
+    coefficients_list <- lapply(orthonormalised_coefficients_list, function(coeff) {
+        return(deorthonormalise_coefficients(
+            coeff,
+            orthonormalisation_factors,
+            group_start_indices
+        )[unordering_indices] / X_scale)
+    })
 
     mat_X <- as.matrix(cbind(1, X))
     mat_Z <- as.matrix(cbind(1, Z))
@@ -327,7 +236,7 @@ gooogleplus <-  function(
     #}, numeric(1))
 
     coefficient_log_likelihood <- vapply(coefficients_list, function(coeff) {
-        return(ll_func(coeff[1:(p + 1)], coeff[(p + 2): (p + q + 2)], vect_y, mat_X, mat_Z, dist, a))
+        return(ll.func(coeff[1:(p + 1)], coeff[(p + 2): (p + q + 2)], vect_y, mat_X, mat_Z, dist, a))
     }, numeric(1))
 
     # get number of model parameters (non-zero coefficients) and exclude intercepts - we have two intercepts
@@ -339,7 +248,7 @@ gooogleplus <-  function(
 
     min_bic_index <- which.min(coefficients_bic)
     optimal_coefficients <- coefficients_list[[min_bic_index]]
-    optimal_lambda <- lambda[min_bic_index]
+    optimal_lambda <- lambda[i]
     optimal_bic <- coefficients_bic[min_bic_index]
     count_coefficients <- optimal_coefficients[1:(p + 1)]
     zero_coefficients <- optimal_coefficients[(p + 2):(p + q + 2)]
@@ -442,6 +351,7 @@ group_coordinate_descent <- function(
     lambda,
     penalty_factors,
     initial_b,
+    initial_residuals,
     eps,
     group_start_indices,
     y,
@@ -466,11 +376,14 @@ group_coordinate_descent <- function(
 
     standard_deviation_y <- sqrt(sum(y ^ 2) / nrow(group_mat_orth))
     convergence_threshold <- eps * standard_deviation_y
+    res <- y - group_mat_orth %*% initial_b
+
     # print(convergence_threshold)
+
     for (i in 1:length(lambda)) {
         # do not keep coefficients in group structure
         penalty_factors_i <- penalty_factors * lambda[i]
-        r <- y - group_mat_orth %*% initial_b
+        r <- res
         current_b <- initial_b
         for (iteration in 1:max_iterations) {
             # do the intercepts first. We treat them as separate, not as one group. We just 'store' them as one group.
@@ -630,7 +543,7 @@ standardise <- function(X) {
     return(res)
 }
 
-ll_func <- function(beta.count, beta.zero, y, X, Z, dist, a = 1)
+ll.func <- function(beta.count, beta.zero, y, X, Z, dist, a = 1)
 {
     if (is.null(Z))
     {
@@ -767,8 +680,6 @@ data <- output$data
 yvar <- output$yvar
 xvars <- output$xvars
 zvars <- output$zvars
-# tpt <- system.time(sim_result_grLasso <- gooogleplus(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), penalty = "grLasso", dist = "poisson"))
-tpt <- system.time(sim_result_grLasso <- gooogleplus(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), penalty = "grLasso", dist = "poisson", lambda = 0, runtime = "C"))
+tpt <- system.time(sim_result_grLasso <- goooglePlusO(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), lambda_min = 0, penalty = "grLasso", dist = "poisson"))
 print(sim_result_grLasso$coefficients)
-# print(tpt)
-# optimal lambda is 0.0003595049 (if lambda_min != 0, otherwise 0)
+print(tpt)

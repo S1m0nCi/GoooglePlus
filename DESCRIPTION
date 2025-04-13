@@ -1,16 +1,11 @@
-Package: Gooogle
+Package: gooogleplus
 Type: Package
-Title: Group Regularization for Zero-inflated Count Models
-Version: 0.0.1
-Date: 2017-09-11
-Author: Saptarshi Chatterjee <schatterjee@niu.edu>, Shrabanti Chowdhury <gg0658@wayne.edu> and Himel Mallick <hmallick@hsph.harvard.edu>
-Maintainer: Saptarshi Chatterjee <schatterjee@niu.edu>, Shrabanti Chowdhury <gg0658@wayne.edu>, and Himel Mallick <hmallick@hsph.harvard.edu>
-Description: Efficient algorithm for fitting zero inflated count models in the presence of intrinsic grouping structure in the covariate space. This  includes group level selection methods such as group lasso, group MCP and group SCAD and bi-level selection method such as group bridge.
-Depends: R (>= 3.5.1), MASS
-License: Harvard
-LazyData: TRUE
-Imports: pscl, grpreg, stringr, gamlss.dist
-RoxygenNote: 6.0.1
-Suggests: 
-    testthat (>= 3.0.0)
-Config/testthat/edition: 3
+Title: A package to fit group regularised models to zero-inflated count data.
+Version: 1.0
+Date: 2025-04-10
+Author: Simon Ciavarro
+Maintainer: Simon Ciavarro <gbsimone@outlook.com>
+Description: This package uses group coordinate descent to perform group variable selection on regression models for zero-inflated count data and returns a fitted model.
+License: MIT
+Encoding: UTF-8
+RoxygenNote: 7.3.2

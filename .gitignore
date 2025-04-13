@@ -1,3 +1,8 @@
 .Rproj.user
 GoooglePlus.Rproj
-tests
+tests/
+*.txt
+
+# C compiler results
+*.o
+*.dll
