@@ -2,7 +2,7 @@
 GoooglePlus.Rproj
 tests/
 *.txt
-
+*.csv
 # C compiler results
 *.o
 *.dll

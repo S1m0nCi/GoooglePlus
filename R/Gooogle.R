@@ -7,7 +7,7 @@ library(grpreg)
 library(MASS)
 library(stringr)
 library(gamlss.dist)
-# nolint start
+#nolint start
 #' PD approximation of a matrix.
 #'
 #' @description The function uses eigen values and eigen vectors to recreate a pd matrix.
@@ -233,14 +233,8 @@ gooogle<-function(data,xvars,zvars,yvar,group=1:ncol(data),
 
     ## reorder the group index and the covariates
     group<-c(group.x,group.z)
-    u<-unique(group)
-    cov.star.reordered<-rep(0,dim(cov.star)[1])
-    for(i in 1:length(u))
-    {
-      index<-which(group==u[i])
-      cov.star.reordered<-cbind(cov.star.reordered,cov.star[,index])
-    }
-    cov.star.reordered<-cov.star.reordered[,-1]
+    g_order <- order(group)
+    cov.star.reordered<-cov.star[, g_order]
     group<-sort(group)
 
     if (penalty=="gBridge")
@@ -273,15 +267,8 @@ gooogle<-function(data,xvars,zvars,yvar,group=1:ncol(data),
     names(cov.star)<-c(xvars,zvars)
 
     group<-c(group.x,group.z) # 0 indicator correspond to disperison and intercept terms
-    u<-unique(group)
-    ## reorder the group index and the covariates
-    cov.star.reordered<-rep(0,dim(cov.star)[1])
-    for(i in 1:length(u))
-    {
-      index<-which(group==u[i])
-      cov.star.reordered<-cbind(cov.star.reordered,cov.star[,index])
-    }
-    cov.star.reordered<-cov.star.reordered[,-1]
+    g_order <- order(group)
+    cov.star.reordered<-cov.star[, g_order]
     group<-sort(group)
 
     if (penalty=="gBridge")
@@ -313,6 +300,6 @@ gooogle<-function(data,xvars,zvars,yvar,group=1:ncol(data),
       coeff.final=list(count=fit.final.coeff.count,zero=fit.final.coeff.zero,dispersion=a)
     }
 
-    return(list(coefficients=coeff.final,aic=aic, bic=bic, loglik=ll, lambda=fit$lambda))
+    return(list(coefficients=coeff.final,aic=aic, bic=bic, loglik=ll))
 }
 # nolint end

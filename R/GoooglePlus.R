@@ -3,6 +3,7 @@ library(vscDebugger)
 library(gamlss.dist)
 library(roxygen2)
 library(stats)
+library(numDeriv)
 
 library(rockchalk)
 library(mpath)
@@ -75,7 +76,7 @@ gooogleplus <-  function(
     xvars,
     zvars,
     yvar,
-    group = 1:ncol(data),
+    group = seq_len(ncol(data)),
     samegrp.overlap = TRUE,
     penalty = c("grLasso", "grMCP", "grSCAD", "grALasso"),
     dist = c("poisson", "negbin"),
@@ -88,7 +89,7 @@ gooogleplus <-  function(
     alpha = 1,
     eps = .001,
     max_iter = 1000,
-    gamma = ifelse(penalty == "grSCAD", 4, 3), 
+    gamma = ifelse(penalty == "grSCAD", 4, 3),
     runtime = c("C", "R", "compare")
 )
 {
@@ -122,7 +123,8 @@ gooogleplus <-  function(
         # rename Z dataframe
         names(Z) <- paste(names(Z), ".zero", sep = "")
 
-        # the below code just ensures no overlap of X and Z group numbers: they are treated as completely separate groups: hence we add the max of groups x to ensure none are shared
+        # the below code just ensures no overlap of X and Z group numbers: they are treated as completely separate groups:
+        # hence we add the max of groups x to ensure none are shared
         if (samegrp.overlap) {  # if X and Z assign same groups for shared covariates
             group.z <- group[which(pred.names %in% zvars)]
         } else {
@@ -175,156 +177,148 @@ gooogleplus <-  function(
     X_scale <- X_std$s
     fit.coefficients <- fit.coefficients * X_scale
 
-    # reorder the group index and the covariates
-    group <- c(0, group.x, 0, group.z)
-
-    # initialise pseudo_X reordered by group
-    group_ordered_indices <- order(group)
-    # get the indices for putting into unordered form again (original form)
-    unordering_indices <- numeric(length(group))
-    for (i in 1:length(group_ordered_indices)) {
-        unordering_indices[group_ordered_indices[i]] <- i
-    }
-    pseudo_X <- pseudo_X[, group_ordered_indices]
-    fit.coefficients <- fit.coefficients[group_ordered_indices]
-
-    group <- sort(group)
-    unique_groups <- unique(group)
-    # scaling and group sorting has now already been done
-    # now we implement the group coordinate descent algorithm
-    # according to Zeng, we do not need to transform back to non-LSA, so non-pseudo data
-    # however we will need to orthogonalise and then transform back
-
-    # get the group matrices
-    # use 'match' and convert to integer for C conversion
-    group_start_indices <- as.integer(c(match(unique_groups, group), length(group) + 1))
-    penalty_factors <- numeric(length(unique_groups))
-    # the intercepts are to be unpenalised - setting penalisation to 0.
-    penalty_factors[1] <- 0
-
-    # we want penalty factors of zero for the intercepts, so the last two elements of the group
-    for (i in 2:(length(group_start_indices) - 1)) {
-        # group_matrices[[i]] <- pseudo_X[, group_start_indices[i]:group_start_indices[i + 1] - 1]
-        penalty_factors[i] <- sqrt(group_start_indices[i + 1] - group_start_indices[i])
-    }
-
-    if (penalty == "grALASSO") {
-        # length of penalty factors and length of group norms should be the same
-        for (i in 2:(length(group_start_indices) - 1)) {
-            group_norm <- sqrt(sum(fit.coefficients[group_start_indices[i]:group_start_indices[i + 1]]))
-            if (group_norm == 0) {
-                # avoid zero division
-                group_norm <- .Machine$double.eps
-            }
-            penalty_factors[i] <- penalty_factors[i] / group_norm
-        }
-    }
-
-    # orthonormalise the group matrices
-    group_matrices_orth_full <- orthonormalise_full_matrix(pseudo_X, group_start_indices)
-    group_matrix_orthonormal <- group_matrices_orth_full[[1]]
-    orthonormalisation_factors <- group_matrices_orth_full[[2]]
-
-    # Multiple lambda values - one parameter only, which is lambda
-    if (missing(lambda)) {
-        if (missing(lambda_max)) {
-            # we may need glmnet here instead of zeroinfl because our method relies on group coordinate descent. Just for finding lambda_max
-            group_matrix_df <- as.data.frame(group_matrix_orthonormal)
-            names(group_matrix_df) <- names(fit.coefficients)
-            intercepts_fit <- glm(
-                as.formula(paste("y ~ 0 + count.intercept + zero.intercept")),
-                data = cbind(data.frame(y = unlist(pseudo_Y)), group_matrix_df)
-            )
-            # will give matrix of 2 cols, instead of vector
-            # make a matrix of X, Z and rearrange for groups as necessary
-            zmax <- maxgrad(group_matrix_orthonormal, intercepts_fit$residuals, group_start_indices, penalty_factors) / nrow(group_matrix_orthonormal)
-            lambda_max <- zmax
-        }
-        if (log.lambda) {
-            # creating in descending order
-            if (lambda_min == 0) {
-                lambda <- c(exp(seq(log(lambda_max), log(0.001 * lambda_max), length = nlambda - 1)), 0)
-            } else {
-                lambda <- exp(seq(log(lambda_max), log(lambda_min * lambda_max), length = nlambda))
-            }
-        }
-        else {
-            if (lambda_min == 0) {
-                lambda <- c(seq(lambda_max, 0.001 * lambda_max, length = nlambda - 1), 0)
-            } else {
-                lambda <- seq(lambda_max, lambda_min * lambda_max, length = nlambda)
-            }
-        }
-    } else {
-        nlambda <- length(lambda)
-    }
-
-    if (runtime == "R" || runtime == "compare") {
-
-        orthonormalised_coefficients_list <- group_coordinate_descent(
-            group_matrix_orthonormal,
-            lambda,
-            penalty_factors,
-            fit.coefficients,
-            eps,
-            group_start_indices,
-            pseudo_Y,
-            penalty = penalty,
-            max_iterations = max_iter
-        )
-
-        coefficients_list <- lapply(orthonormalised_coefficients_list, function(coeff) {
-            return(deorthonormalise_coefficients(
-                coeff,
-                orthonormalisation_factors,
-                group_start_indices
-            )[unordering_indices] / X_scale)
-        })
-    }
-    if (runtime == "C" || runtime == "compare") {
-        orthonormalised_coefficients_cm <- .Call(
-            "groupCoordinateDescent",
-            group_matrix_orthonormal,
-            lambda,
-            penalty_factors,
-            fit.coefficients,
-            eps,
-            group_start_indices,
-            pseudo_Y,
-            gamma,
-            penalty,
-            as.integer(max_iter)
-        )
-
-        group_start_indices <- group_start_indices + rep(1, length(group_start_indices))
-
-        orthonormalised_coefficients <- matrix(orthonormalised_coefficients_cm, nrow = p + q + 2, ncol = nlambda)
-        # Step 1: De-orthonormalise and unorder coefficients
-        coefficients_list <- apply(orthonormalised_coefficients, 2, function(coeff) {
-            return(deorthonormalise_coefficients(
-                coeff,
-                orthonormalisation_factors,
-                group_start_indices
-            )[unordering_indices] / X_scale)
-        }, simplify = FALSE)
-    }
-
     mat_X <- as.matrix(cbind(1, X))
     mat_Z <- as.matrix(cbind(1, Z))
     vect_y <- as.numeric(y[, 1])
 
-    # Step 2: Find bic and optimise
-    #coefficient_log_likelihood <- vapply(coefficients_list, function(coeff) {
-    #    return(
-    #        zip_log_likelihood(
-    #            mat_X,
-    #            mat_Z,
-    #            coeff[1:(p + 1)],
-    #            coeff[(p + 2): (p + q + 2)],
-    #            mat_y
-    #        )
-    #    )
-    #}, numeric(1))
+    if (penalty == "BAR") {
+        if (missing(lambda)) {
+            if (missing(lambda_max)) {
+                colnames(pseudo_X) <- names(fit.coefficients)
+                bar_intercepts_fit <- glm(
+                    as.formula("y ~ 0 + count.intercept + zero.intercept"),
+                    data = cbind(data.frame(y = unlist(pseudo_Y)), pseudo_X)
+                )
+                # now deorthonormalise those
+                bar_intercepts_coeff <- rep(0, p + q + 2)
+                bar_intercepts_coeff[1] <- bar_intercepts_fit$coefficients["count.intercept"] / X_scale[1]
+                bar_intercepts_coeff[p + 2] <- bar_intercepts_fit$coefficients["zero.intercept"] /  X_scale[p + 2]
+                lambda_max <- maxgrad_bar(mat_X, mat_Z, vect_y, bar_intercepts_coeff, p, q)
+            }
+            lambda <- create_lambda(lambda_max, lambda_min, log.lambda, nlambda)
+        }
+        else {
+            nlambda <- length(lambda)
+        }
+        coefficients_list <- cycBAR(mat_X, mat_Z, vect_y, pseudo_X, pseudo_Y, X_scale, lambda, p, q, max_iter, eps)
+        print(coefficients_list)
+    } else {
+        # reorder the group index and the covariates
+        group <- c(0, group.x, 0, group.z)
+
+        # initialise pseudo_X reordered by group
+        group_ordered_indices <- order(group)
+        # get the indices for putting into unordered form again (original form)
+        unordering_indices <- numeric(length(group))
+        for (i in seq_along(group_ordered_indices)) {
+            unordering_indices[group_ordered_indices[i]] <- i
+        }
+        pseudo_X <- pseudo_X[, group_ordered_indices]
+        fit.coefficients <- fit.coefficients[group_ordered_indices]
+
+        group <- group[group_ordered_indices]
+        unique_groups <- unique(group)
+
+        # get the group matrices
+        # use 'match' and convert to integer for C conversion
+        group_start_indices <- as.integer(c(match(unique_groups, group), length(group) + 1))
+        penalty_factors <- numeric(length(unique_groups))
+        # the intercepts are to be unpenalised - setting penalisation to 0.
+        penalty_factors[1] <- 0
+
+        # we want penalty factors of zero for the intercepts, so the last two elements of the group
+        for (i in 2:(length(group_start_indices) - 1)) {
+            # group_matrices[[i]] <- pseudo_X[, group_start_indices[i]:group_start_indices[i + 1] - 1]
+            penalty_factors[i] <- sqrt(group_start_indices[i + 1] - group_start_indices[i])
+        }
+
+        if (penalty == "grALASSO") {
+            # length of penalty factors and length of group norms should be the same
+            for (i in 2:(length(group_start_indices) - 1)) {
+                group_norm <- sqrt(sum(fit.coefficients[group_start_indices[i]:group_start_indices[i + 1]]))
+                if (group_norm == 0) {
+                    # avoid zero division
+                    group_norm <- .Machine$double.eps
+                }
+                penalty_factors[i] <- penalty_factors[i] / group_norm
+            }
+        }
+
+        # orthonormalise the group matrices
+        group_matrices_orth_full <- orthonormalise_full_matrix(pseudo_X, group_start_indices)
+        group_matrix_orthonormal <- group_matrices_orth_full[[1]]
+        orthonormalisation_factors <- group_matrices_orth_full[[2]]
+
+        # Multiple lambda values - one parameter only, which is lambda
+        if (missing(lambda)) {
+            if (missing(lambda_max)) {
+                # we may need glmnet here instead of zeroinfl because our method relies on group coordinate descent. Just for finding lambda_max
+                group_matrix_df <- as.data.frame(group_matrix_orthonormal)
+                names(group_matrix_df) <- names(fit.coefficients)
+                intercepts_fit <- glm(
+                    as.formula(paste("y ~ 0 + count.intercept + zero.intercept")),
+                    data = cbind(data.frame(y = unlist(pseudo_Y)), group_matrix_df)
+                )
+                # will give matrix of 2 cols, instead of vector
+                # make a matrix of X, Z and rearrange for groups as necessary
+                zmax <- maxgrad(group_matrix_orthonormal, intercepts_fit$residuals, group_start_indices, penalty_factors) / nrow(group_matrix_orthonormal)
+                lambda_max <- zmax
+            }
+            lambda <- create_lambda(lambda_max, lambda_min, log.lambda, nlambda)
+        } else {
+            nlambda <- length(lambda)
+        }
+
+        if (runtime == "R" || runtime == "compare") {
+
+            orthonormalised_coefficients_list <- group_coordinate_descent(
+                group_matrix_orthonormal,
+                lambda,
+                penalty_factors,
+                fit.coefficients,
+                eps,
+                group_start_indices,
+                pseudo_Y,
+                penalty = penalty,
+                max_iterations = max_iter
+            )
+
+            coefficients_list <- lapply(orthonormalised_coefficients_list, function(coeff) {
+                return(deorthonormalise_coefficients(
+                    coeff,
+                    orthonormalisation_factors,
+                    group_start_indices
+                )[unordering_indices] / X_scale)
+            })
+        }
+        if (runtime == "C" || runtime == "compare") {
+            orthonormalised_coefficients_cm <- .Call(
+                "groupCoordinateDescent",
+                group_matrix_orthonormal,
+                lambda,
+                penalty_factors,
+                fit.coefficients,
+                eps,
+                group_start_indices,
+                pseudo_Y,
+                gamma,
+                penalty,
+                as.integer(max_iter)
+            )
+
+            group_start_indices <- group_start_indices + rep(1, length(group_start_indices))
+
+            orthonormalised_coefficients <- matrix(orthonormalised_coefficients_cm, nrow = p + q + 2, ncol = nlambda)
+            # Step 1: De-orthonormalise and unorder coefficients
+            coefficients_list <- apply(orthonormalised_coefficients, 2, function(coeff) {
+                return(deorthonormalise_coefficients(
+                    coeff,
+                    orthonormalisation_factors,
+                    group_start_indices
+                )[unordering_indices] / X_scale)
+            }, simplify = FALSE)
+        }
+    }
 
     coefficient_log_likelihood <- vapply(coefficients_list, function(coeff) {
         return(ll_func(coeff[1:(p + 1)], coeff[(p + 2): (p + q + 2)], vect_y, mat_X, mat_Z, dist, a))
@@ -333,7 +327,7 @@ gooogleplus <-  function(
     # get number of model parameters (non-zero coefficients) and exclude intercepts - we have two intercepts
     # at the moment, this may be overstated => Zeng's approach of e^lambda may be better.
     df <- vapply(coefficients_list, function(x) { return(sum(x != 0) - 2) }, numeric(1))
-    coefficients_bic <- vapply(1:length(coefficient_log_likelihood), function(i) {
+    coefficients_bic <- vapply(seq_along(coefficient_log_likelihood), function(i) {
         return(df[i] * log(nrow(X)) - 2 * coefficient_log_likelihood[i])
     }, numeric(1))
 
@@ -361,7 +355,7 @@ orthonormalise_full_matrix <- function(all_groups_matrix, group_start_indices) {
     matrix_factors <- vector("list", length(group_start_indices))
     intercept_factors <- numeric(group_start_indices[2] - group_start_indices[1])
     for (i in group_start_indices[1]:(group_start_indices[2] - 1)) {
-        orth_intercept <- svd_intercept_vector(all_groups_matrix[, i], n)
+        orth_intercept <- svd_group_vector(all_groups_matrix[, i], n)
         orthonormalised_matrix[, i] <- orth_intercept[[1]]
         intercept_factors[i] <- orth_intercept[[2]]
     }
@@ -369,7 +363,11 @@ orthonormalise_full_matrix <- function(all_groups_matrix, group_start_indices) {
     for (i in 2:(length(group_start_indices) - 1)) {
         # get the matrix:
         group_matrix <- all_groups_matrix[, group_start_indices[i]:(group_start_indices[i + 1] - 1), drop = FALSE]
-        orth_group_matrix_and_factor <- svd_group_matrix(group_matrix, n)
+        if (group_start_indices[i + 1] - 1 == group_start_indices[i]) {
+            orth_group_matrix_and_factor <- svd_group_vector(group_matrix, n)
+        } else {
+            orth_group_matrix_and_factor <- svd_group_matrix(group_matrix, n)
+        }
         orthonormalised_group_matrix <- orth_group_matrix_and_factor[[1]]
         matrix_factors[[i]] <- orth_group_matrix_and_factor[[2]]
         orthonormalised_matrix[, group_start_indices[i]:(group_start_indices[i + 1] - 1)] <- orthonormalised_group_matrix
@@ -424,7 +422,7 @@ svd_group_matrix <- function(matrix, n) {
     return(matrix_and_factor)
 }
 
-svd_intercept_vector <- function(vect, n) {
+svd_group_vector <- function(vect, n) {
     svdresult <- svd(vect, nu = 0)
     vfactor <- sqrt(n) * svdresult$v * 1 / svdresult$d
     return(list(
@@ -464,10 +462,10 @@ group_coordinate_descent <- function(
         threshold <- vector_scad_firm_threshold
     }
 
-    standard_deviation_y <- sqrt(sum(y ^ 2) / nrow(group_mat_orth))
-    convergence_threshold <- eps * standard_deviation_y
+    sdy <- sqrt(sum(y ^ 2) / nrow(group_mat_orth))
+    tol <- eps * sdy
     # print(convergence_threshold)
-    for (i in 1:length(lambda)) {
+    for (i in seq_along(lambda)) {
         # do not keep coefficients in group structure
         penalty_factors_i <- penalty_factors * lambda[i]
         r <- y - group_mat_orth %*% initial_b
@@ -501,7 +499,7 @@ group_coordinate_descent <- function(
                 max_change <- max(max_change, max(abs(b_change)))
             }
 
-            if (max_change < eps) {
+            if (max_change < tol) {
                 break
             }
         }
@@ -582,33 +580,28 @@ maxgrad <- function(X, residuals, group_start_indices, penalty_factors) {
     return(zmax)
 }
 
+create_lambda <- function(lambda_max, lambda_min, log.lambda, nlambda) {
+    if (log.lambda) {
+        # creating in descending order
+        if (lambda_min == 0) {
+            lambda <- c(exp(seq(log(lambda_max), log(0.001 * lambda_max), length = nlambda - 1)), 0)
+        } else {
+            lambda <- exp(seq(log(lambda_max), log(lambda_min * lambda_max), length = nlambda))
+        }
+    }
+    else {
+        if (lambda_min == 0) {
+            lambda <- c(seq(lambda_max, 0.001 * lambda_max, length = nlambda - 1), 0)
+        } else {
+            lambda <- seq(lambda_max, lambda_min * lambda_max, length = nlambda)
+        }
+    }
+    return(lambda)
+}
+
 mean_squared_error <- function(pseudo_X, coeff, actual_obs) {
     predictions <- pseudo_X %*% coeff
     return(sum((predictions - actual_obs)^2) / nrow(pseudo_X))
-}
-
-# Taken from Lambert's paper
-zip_log_likelihood <- function(X, Z, x_coeff, z_coeff, y) {
-    # indices of where y is zero
-    indices_y0 <- which(y == 0)
-    indices_yg0 <- which(y > 0)
-    X_0 <- X[indices_y0, ]
-    X_g0 <- X[indices_yg0, ]
-    Z_0 <- Z[indices_y0, ]
-    y_g0 <- y[indices_yg0, ]
-
-    sum_log_y0 <- sum(log(exp(Z_0 %*% z_coeff) + exp(-exp(X_0 %*% x_coeff))))
-
-    sum_all_y <- sum(log(1 + exp(Z %*% z_coeff)))
-
-    sum_yg0 <- sum(y_g0 * (X_g0 %*% x_coeff) - exp(X_g0 %*% x_coeff))
-
-    # sum over all y > 0 of (log(y!) = sum to y from 1 of logn)
-    # we could possibly make this even faster
-    log_sum <- cumsum(log(1:max(y_g0)))
-    sum_yg0_factorial <- sum(log_sum[y_g0])
-
-    return(sum_log_y0 + sum_yg0 - sum_all_y - sum_yg0_factorial)
 }
 
 standardise <- function(X) {
@@ -659,116 +652,165 @@ ll_func <- function(beta.count, beta.zero, y, X, Z, dist, a = 1)
     return(ll)
 }
 
-# Improvements:
+# Taken from Lambert's paper
+zip_log_likelihood <- function(X, Z, coeff, y) {
+    x_coeff <- coeff[seq_len(ncol(X))]
+    z_coeff <- coeff[(ncol(X) + 1):(ncol(X) + ncol(Z))]
+    # indices of where y is zero
+    indices_y0 <- which(y == 0)
+    indices_yg0 <- which(y > 0)
+    X_0 <- X[indices_y0, ]
+    X_g0 <- X[indices_yg0, ]
+    Z_0 <- Z[indices_y0, ]
+    y_g0 <- y[indices_yg0]
 
-# Standardise the whole vector before using group standardisation:
-# Find a way to do this without requiring an intercept
-# We have centering and scaling
-# What if we only scale and do not centre
+    sum_log_y0 <- sum(log(exp(Z_0 %*% z_coeff) + exp(-exp(X_0 %*% x_coeff))))
 
-# Try to remove intercepts as they do
+    sum_all_y <- sum(log(1 + exp(Z %*% z_coeff)))
 
-gen_zip_data <- function(
-    n.train,
-    n.test,
-    grpsize,
-    rho,
-    phi,
-    seedval
-) {
-    # Define beta
-    beta <- c(-1, -0.5, -0.25, -0.1, 0.1, 0.25, 0.5, 0.75, rep(0.2, 8), rep(0, 24))
-    beta <- c(5, beta)
+    sum_yg0 <- sum(y_g0 * (X_g0 %*% x_coeff) - exp(X_g0 %*% x_coeff))
 
-    # Define gamma
-    gamma <- c(-0.4, -0.3, -0.2, -0.1, 0.1, 0.2, 0.3, 0.4, rep(0.2, 8), rep(0, 24))
+    # sum over all y > 0 of (log(y!) = sum to y from 1 of logn)
+    # we could possibly make this even faster
+    log_sum <- cumsum(log(1:max(y_g0)))
+    sum_yg0_factorial <- sum(log_sum[y_g0])
 
-    # Adjust gamma based on phi
-    if (phi == 0.3) gamma <- c(-1, gamma)
-    if (phi == 0.4) gamma <- c(-0.5, gamma)
-    if (phi == 0.5) gamma <- c(0, gamma)
-
-    # Set seed if provided
-    if (!is.null(seedval)) set.seed(seedval)
-
-    # Define n, p, and ngrp
-    n <- n.train + n.test
-    p <- sum(grpsize)
-    ngrp <- length(grpsize)
-
-    # Generate random normal matrix (R)
-    R <- matrix(rnorm(n * p), n, p)
-
-    # Create correlation matrix (V)
-    V <- matrix(0, ngrp, ngrp)
-    for (i in 1:ngrp) {
-        for (j in 1:ngrp) {
-            V[i, j] <- rho^(abs(i - j))
-        }
-    }
-
-    # Generate multivariate normal matrix (Z)
-    Z <- mvrnorm(n, mu = rep(0, ngrp), Sigma = V)
-
-    # Create design matrix (X)
-    X <- matrix(0, n, p)
-    for (g in 1:ngrp) {
-        for (j in 1:grpsize[g]) {
-            X[, (g - 1) * grpsize[g] + j] <- (Z[, g] + R[, (g - 1) * grpsize[g] + j]) / sqrt(2)
-        }
-    }
-
-    # Standardize X
-    X <- scale(X)
-
-    # Set column names for X
-    colnames(X) <- paste("X", c(1:ncol(X)), sep = "")
-
-    # Define variable names
-    xvars <- colnames(X)
-    zvars <- xvars
-
-    # Capture zero inflation (if seedval is null)
-    if (is.null(seedval)) {
-        rn <- round(runif(1) * 10^5)
-        set.seed(rn)
-        y <- rzi(n = n, x = X, z = X, a = beta, b = gamma, family = "poisson")
-
-        set.seed(rn)
-        # Capture from console output
-        yout <- capture.output(rzi(n, x = X, z = X, a = beta, b = gamma, family = "poisson"))
-        zeroinfl <- as.numeric(substring(yout[1], 15))
-    } else {
-        y <- rzi(n = n, x = X, z = X, a = beta, b = gamma, family = "poisson")
-
-        # Capture from console output
-        yout <- capture.output(rzi(n, x = X, z = X, a = beta, b = gamma, family = "poisson"))
-        zeroinfl <- as.numeric(substring(yout[1], 15))
-    }
-
-    # Combine data into a data frame
-    data <- cbind.data.frame(y, X)
-
-    # Return list
-    return(list(data = data,
-                yvar = "y",
-                xvars = xvars,
-                zvars = zvars,
-                zeroinfl = zeroinfl,
-                coefficients = list(
-                    count = beta,
-                    zero = gamma
-                )))
+    return(sum_log_y0 + sum_yg0 - sum_all_y - sum_yg0_factorial)
 }
 
+zipll_deriv <- function(X, Z, coeff, y, k) {
+    p1 <- ncol(X)
+    x_coeff <- coeff[1:p1]
+    z_coeff <- coeff[(p1 + 1):(p1 + ncol(Z))]
+    # indices of where y is zero
+    indices_y0 <- which(y == 0)
+    indices_yg0 <- which(y > 0)
+    X_0 <- X[indices_y0, ]
+    X_g0 <- X[indices_yg0, ]
+    Z_0 <- Z[indices_y0, ]
+    y_g0 <- y[indices_yg0]
 
-output <- gen_zip_data(200, 50, rep.int(8, 5), 0.1, 0.4, 200)
-data <- output$data
-yvar <- output$yvar
-xvars <- output$xvars
-zvars <- output$zvars
-# tpt <- system.time(sim_result_grLasso <- gooogleplus(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), penalty = "grLasso", dist = "poisson"))
-tpt <- system.time(sim_result_grLasso <- gooogleplus(data, xvars, zvars, yvar, c(rep(1, 8), rep(2, 8), rep(3, 8), rep(4, 8), rep(5, 8)), penalty = "grLasso", dist = "poisson", lambda = 0, runtime = "C"))
-print(sim_result_grLasso$coefficients)
-# print(tpt)
-# optimal lambda is 0.0003595049 (if lambda_min != 0, otherwise 0)
+    # useful quantities
+    A <- exp(X_0 %*% x_coeff)
+    E <- exp(-A)
+    J <- exp(Z_0 %*% z_coeff)
+
+    A_g0 <- exp(X_g0 %*% x_coeff)
+    J_all <- exp(Z %*% z_coeff)
+
+
+    # count coefficient (beta) else zero coefficient (gamma)
+    # we need to use k below
+    if (k <= p1) {
+        X_k_0 <- X[indices_y0, k]
+        X_k_g0 <- X[indices_yg0, k]
+        return(sum((-X_k_0 * A) / (1 + J / E)) + sum(X_k_g0 * (y_g0 - A_g0)))
+    } else {
+        Z_k_0 <- Z[indices_y0, k - p1]
+        return(sum(Z_k_0 / (1 + E / J)) - sum(Z[, k - p1] / (1 + 1 / J_all)))
+    }
+}
+
+zipll_dderiv <- function(X, Z, coeff, y, k) {
+    p1 <- ncol(X)
+    x_coeff <- coeff[1:p1]
+    z_coeff <- coeff[(p1 + 1):(p1 + ncol(Z))]
+    # indices of where y is zero
+    indices_y0 <- which(y == 0)
+    indices_yg0 <- which(y > 0)
+    X_0 <- X[indices_y0, ]
+    X_g0 <- X[indices_yg0, ]
+    Z_0 <- Z[indices_y0, ]
+
+    # useful quantities
+    A <- exp(X_0 %*% x_coeff)
+    E <- exp(-A)
+    J <- exp(Z_0 %*% z_coeff)
+
+    A_g0 <- exp(X_g0 %*% x_coeff)
+    J_all <- exp(Z %*% z_coeff)
+
+    # count coefficient (beta) else zero coefficient (gamma)
+    # we need to use k below
+    if (k <= p1) {
+        X_k_0 <- X[indices_y0, k]
+        X_k_g0 <- X[indices_yg0, k]
+        return(sum((X_k_0^2 * E * A * (J * A + E + J)) / (E + J)^2) - sum(X_k_g0^2 * A_g0))
+    } else {
+        Z_k_0 <- Z[indices_y0, k - p1]
+        return(sum(Z_k_0^2 * J * E / ((J + E)^2)) - sum(Z[, k - p1]^2 * J_all / ((1 + J_all)^2)))
+    }
+}
+
+# when we do cycBAR there is no need to rearrange for groups
+
+cycBAR <- function(X, Z, y, pseudo_X, pseudo_Y, X_scale, lambda, p, q, max_iterations, eps) {
+    # no penalty factors here as this is individial variable selection so there is no need for group normalisation.
+    n <- length(y)
+    coefficients_list <- vector("list", length(lambda))
+    sdy <- sqrt(sum(y ^ 2) / n)
+    tol <- eps * sdy
+
+    for (i in seq_along(lambda)) {
+        lam <- lambda[i] / n
+        # calculate ridge estimate
+        coeff <- (solve(t(pseudo_X) %*% pseudo_X + lam * diag(ncol(pseudo_X))) %*% t(pseudo_X) %*% pseudo_Y) / X_scale
+        for (iter in 1:max_iterations) {
+            print(paste("iter", iter))
+            new_coeff <- numeric(p + q + 2)
+            # c2 <- hessian(function(coeff) {
+            #     return(zip_log_likelihood(X, Z, coeff, y))
+            # }, coeff)
+            for (j in 1:(p + q + 2)) {
+                c1j <- - zipll_deriv(X, Z, coeff, y, j)
+                c2j <- - zipll_dderiv(X, Z, coeff, y, j)
+                bj <- c2j * coeff[j] - c1j
+                print(j)
+                print(c2j)
+                # print(c2[j, j])
+                if (j != 1 && j != p + 2) {
+                    if (abs(bj) < (2 * sqrt(c2j * lam))) {
+                        new_coeff[j] <- 0
+                    } else {
+                        new_coeff[j] <- (bj + sign(bj) * sqrt(bj ^ 2 - 4 * c2j * lam)) / (2 * c2j)
+                    }
+                } else {
+                    new_coeff[j] <- bj / c2j
+                }
+            }
+            print(new_coeff)
+            if (max(abs((new_coeff - coeff))) < tol) {
+                break
+            }
+            coeff <- new_coeff
+        }
+        coefficients_list[[i]] <- coeff
+    }
+
+    return(coefficients_list)
+}
+
+maxgrad_bar <- function(X, Z, y, coefficients, p, q) {
+    print("in maxgrad")
+    print(ll_func(coefficients[1:(p + 1)], coefficients[(p + 2):(p + q + 2)], y, X, Z, dist = "poisson"))
+    c1 <- - grad(function(coeff) {
+        return(ll_func(coeff[1:(p + 1)], coeff[(p + 2):(p + q + 2)], y, X, Z, dist = "poisson"))
+    }, coefficients)
+    c2 <- - hessian(function(coeff) {
+        return(ll_func(coeff[1:(p + 1)], coeff[(p + 2):(p + q + 2)], y, X, Z, dist = "poisson"))
+    }, coefficients)
+    print("c1")
+    print(c1)
+    print("c2")
+    for (i in 1:(p + q + 2)) {
+        print(c2[i, i])
+    }
+    lmax <- numeric(p + q + 2)
+    for (i in 2:length(lmax)) {
+        lmax[i] <- (c1[i]^2) / (4 * c2[i, i])
+    }
+    print("lmax:")
+    print(lmax)
+    print(which.max(lmax))
+    return(max(lmax))
+}
