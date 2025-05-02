@@ -730,11 +730,11 @@ large_simulation_set <- list(
 
 # run_simulations(initial_set, "tp")
 
-run_large_simulation(large_simulation_set, "results_sgt")
+# run_large_simulation(large_simulation_set, "results_sgt")
 
-SAMEGRP.OVERLAP <- FALSE
+# SAMEGRP.OVERLAP <- FALSE
 
-run_large_simulation(large_simulation_set, "results_sgf")
+# run_large_simulation(large_simulation_set, "results_sgf")
 
 # list(
 #     id = 1, # to identify
